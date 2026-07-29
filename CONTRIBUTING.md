@@ -1,9 +1,5 @@
 # Contributing to perf-libs-sparse
 
-## Account creation
-
-To contribute to the project, you will need an account on [https://gitlab.arm.com](https://gitlab.arm.com).  Details on how to create an account can be found [here](https://gitlab.arm.com/documentation/contributions).
-
 ## Licensing
 
 By contributing, you confirm that you have the right to submit the change under the repository license terms. Keep SPDX headers intact and add them to new source files where appropriate.

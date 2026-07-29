@@ -15,7 +15,7 @@ A library of high-performance sparse linear algebra functions targeting AArch64.
 ## Quick Start
 
 ```bash
-git clone https://gitlab.arm.com/libraries/perf-libs-sparse.git
+git clone https://github.com/arm/perf-libs-sparse.git
 cd perf-libs-sparse
 python3 -m pip install --user mako
 CC=gcc CXX=g++ FC=gfortran cmake -S . -B build
