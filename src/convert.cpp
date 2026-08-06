@@ -50,9 +50,30 @@ template <typename T> perflibs_dense<T> csr2dense(perflibs_csr<T> &csr) {
 }
 
 template <typename T> perflibs_csr<T> scs2csr(perflibs_scs<T> &scs) {
-  return scs2csr(scs.m, scs.n, scs.C, scs.vals, scs.col_indx_offsets,
-                 scs.col_indx_min, scs.col_indx_bytes, scs.cl, scs.cs,
-                 scs.row_permd2in);
+  auto csr = scs2csr(scs.m, scs.n, scs.C, scs.vals, scs.col_indx_offsets,
+                     scs.col_indx_min, scs.col_indx_bytes, scs.cl, scs.cs,
+                     scs.row_permd2in);
+
+  if (scs.optimized_op == PERFLIBS_OPERATION_NOTRANS) {
+    return csr;
+  }
+  if (scs.optimized_op == PERFLIBS_OPERATION_CONJNOTRANS) {
+    for (auto &val : csr.vals) {
+      val = perflibs::sparse::conj(val);
+    }
+    return csr;
+  }
+
+  // TRANS and CONJTRANS SCS store op(A). Convert that CSR to CSC and
+  // reinterpret its arrays as CSR to transpose it back to the logical A.
+  const auto undo_op = scs.optimized_op == PERFLIBS_OPERATION_CONJTRANS
+                           ? PERFLIBS_OPERATION_CONJTRANS
+                           : PERFLIBS_OPERATION_NOTRANS;
+  auto csc = csr2csc(undo_op, csr);
+  const auto index_base = csc.col_ptr_ptr[0];
+  const auto nnz = csc.col_ptr_ptr[csc.n] - index_base;
+  return perflibs_csr<T>(csc.n, csc.m, nnz, csc.vals_ptr, csc.col_ptr_ptr,
+                         csc.row_indx_ptr);
 }
 
 template <typename T> perflibs_csr<T> bsr2csr(perflibs_bsr<T> &bsr) {

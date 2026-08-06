@@ -41,6 +41,15 @@ perflibs_status_t call_spmv(perflibs_sparse_hint_value trans, T alpha,
     spmv_coo<T>(impl->coo, (sparse_hint_value_internal)trans, x, y, alpha, beta,
                 impl->index_base);
   } else if (impl->spmat_format == perflibs_format_scs) {
+    // This is an invariant, since it's checked in spmv_exec, but worth
+    // checking here. Return an error in release builds
+    const bool op_matches =
+        impl->scs.optimized_op == (sparse_hint_value_internal)trans;
+    assert(op_matches);
+    if (!op_matches) {
+      return PERFLIBS_STATUS_EXECUTION_FAILURE;
+    }
+
     spmv_scs_opt(impl->scs, x, y, alpha, beta);
   } else if (impl->spmat_format == perflibs_format_bsr) {
     spmv_bsr<T>(impl->bsr, (sparse_hint_value_internal)trans, x, y, alpha,
@@ -107,7 +116,10 @@ perflibs_status_t spmv_exec(perflibs_sparse_hint_value trans, T alpha,
   // Fall back to CSR if the hint used for optimization disagrees with the one
   // used here for exec, and invalidate any parallel setup (if it was already
   // CSR).
-  if (trans != impl->userhint_spmv_op) {
+  const bool scs_op_mismatch =
+      impl->spmat_format == perflibs_format_scs &&
+      impl->scs.optimized_op != (sparse_hint_value_internal)trans;
+  if (trans != impl->userhint_spmv_op || scs_op_mismatch) {
     if (impl->spmat_format != perflibs_format_identity &&
         impl->spmat_format != perflibs_format_null) {
       convert(perflibs_format_csr, impl);
@@ -318,6 +330,9 @@ void audition_spmv(perflibs_spmat_impl_t<T> *impl, perflibs_int_t C_force,
   };
 
   perflibs_scs<T> best_scs = find_best_scs();
+  // The operation above may have been adjusted to interpret CSC storage as
+  // CSR. Record the operation applied to the original logical matrix.
+  best_scs.optimized_op = (sparse_hint_value_internal)impl->userhint_spmv_op;
 
   if (scs_candidate && small_prob) {
     best_scs.nthreads = 1;
@@ -590,6 +605,20 @@ perflibs_status_t spmv_optimize(perflibs_spmat_impl_t<T> *impl) {
 
   if (impl->spmat_format == perflibs_format_dense) {
     return PERFLIBS_STATUS_SUCCESS;
+  }
+
+  if (impl->spmat_format == perflibs_format_scs) {
+    if (impl->scs.optimized_op ==
+        (sparse_hint_value_internal)impl->userhint_spmv_op) {
+      return PERFLIBS_STATUS_SUCCESS;
+    }
+    auto status = convert(perflibs_format_csr, impl);
+    if (status != PERFLIBS_STATUS_SUCCESS) {
+      return status;
+    }
+    if (impl->csr.vals.empty()) {
+      return PERFLIBS_STATUS_SUCCESS;
+    }
   }
 
   if (impl->userhint_spmv_invocations == PERFLIBS_SPARSE_INVOCATIONS_MANY) {

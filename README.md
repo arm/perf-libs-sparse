@@ -27,7 +27,7 @@ ctest --test-dir build --output-on-failure
 
 ### Prerequisites
 
-- CMake 3.20 or newer
+- CMake 3.24 or newer
 - A C compiler and C++ compiler with C++17 support
 - A Fortran compiler with Fortran 2003 support
 - Note: GNU and LLVM are the recommended compiler suites

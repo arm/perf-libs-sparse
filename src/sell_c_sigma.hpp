@@ -44,6 +44,9 @@ template <typename T> struct perflibs_scs {
 
   perflibs_int_t m = 0;
   perflibs_int_t n = 0;
+  // SCS stores the matrix operation applied during optimization, so its
+  // execution kernel always performs an effective NOTRANS operation.
+  sparse_hint_value_internal optimized_op = PERFLIBS_OPERATION_NOTRANS;
   perflibs_int_t C = 0;     // Chunk size - number of rows
   perflibs_int_t nC = 0;    // Number of chunks
   perflibs_int_t sigma = 0; // Number of consecutive rows to sort

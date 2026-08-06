@@ -136,13 +136,6 @@ void spsv_csc(const perflibs_csc<T> &csc, sparse_hint_value_internal trans,
               T *x, const T *y, T alpha);
 
 template <typename T>
-void spsm_csc(const perflibs_csc<T> &csc, sparse_hint_value_internal trans,
-              sparse_hint_value_internal uplo, sparse_hint_value_internal diag,
-              T *X, perflibs_int_t x_stride_row, perflibs_int_t x_stride_col,
-              const T *Y, perflibs_int_t y_stride_row,
-              perflibs_int_t y_stride_col, perflibs_int_t nrhs, T alpha);
-
-template <typename T>
 void spnorm_inf_csc(const perflibs_csc<T> &csc,
                     perflibs::sparse::remove_complex_t<T> *result);
 

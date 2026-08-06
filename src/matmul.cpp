@@ -15,12 +15,78 @@
 #include "export.hpp"
 #include "matmul_gustavson.hpp"
 #include "matrix_state.hpp"
+#include "matvec.hpp"
 #include "object_helpers.hpp"
 #include "pod_vector.hpp"
 #include "symbolic_matmul_compressed.hpp"
 #include "types.hpp"
 
 namespace perflibs::sparse {
+
+// Repeated SpMV is faster than the row-blocked SpMM kernel for very small RHS
+// counts.  Keep the threshold exclusive: nrhs=5 and above uses SpMM.
+constexpr perflibs_int_t spmm_spmv_nrhs_threshold = 5;
+
+static bool is_external_spmv_op(sparse_hint_value_internal trans) {
+  return trans == PERFLIBS_OPERATION_NOTRANS ||
+         trans == PERFLIBS_OPERATION_TRANS ||
+         trans == PERFLIBS_OPERATION_CONJTRANS;
+}
+
+static bool is_spmv_format(spmat_format_t format) {
+  return format == perflibs_format_csr || format == perflibs_format_csc ||
+         format == perflibs_format_coo || format == perflibs_format_scs ||
+         format == perflibs_format_bsr;
+}
+
+template <typename T>
+perflibs_status_t spmm_repeated_spmv_exec_dense_columns(
+    sparse_hint_value_internal transA, bool conjB, T alpha, perflibs_spmat_t A,
+    perflibs_int_t b_rows, perflibs_int_t c_rows, const T *B,
+    perflibs_int_t b_stride_row, perflibs_int_t b_stride_col, T beta, T *C,
+    perflibs_int_t c_stride_row, perflibs_int_t c_stride_col,
+    perflibs_int_t n) {
+  const bool pack_b = conjB || b_stride_row != 1;
+  const bool pack_c = c_stride_row != 1;
+  perflibs::sparse::pod_vector<T> b_work(pack_b ? b_rows : 0);
+  perflibs::sparse::pod_vector<T> c_work(pack_c ? c_rows : 0);
+  const auto spmv_trans = to_external_enum(transA);
+
+  for (perflibs_int_t rhs = 0; rhs < n; ++rhs) {
+    const T *b_col = B + rhs * b_stride_col;
+    if (pack_b) {
+      for (perflibs_int_t row = 0; row < b_rows; ++row) {
+        const auto value = b_col[row * b_stride_row];
+        b_work[row] = conjB ? perflibs::sparse::conj(value) : value;
+      }
+      b_col = b_work.data();
+    }
+
+    T *c_col = C + rhs * c_stride_col;
+    if (pack_c) {
+      if (beta != T(0)) {
+        for (perflibs_int_t row = 0; row < c_rows; ++row) {
+          c_work[row] = c_col[row * c_stride_row];
+        }
+      }
+      c_col = c_work.data();
+    }
+
+    auto status = spmv_exec<T>(spmv_trans, alpha, A, b_col, beta, c_col);
+    if (status != PERFLIBS_STATUS_SUCCESS) {
+      return status;
+    }
+
+    if (pack_c) {
+      T *c_dst = C + rhs * c_stride_col;
+      for (perflibs_int_t row = 0; row < c_rows; ++row) {
+        c_dst[row * c_stride_row] = c_col[row];
+      }
+    }
+  }
+
+  return PERFLIBS_STATUS_SUCCESS;
+}
 
 template <typename T>
 perflibs_status_t spmm_dispatch_symbolic(perflibs_int_t m, perflibs_int_t n,
@@ -382,23 +448,66 @@ perflibs_status_t spmm_exec_checked(enum sparse_hint_value_internal transA,
            (impl_C->spmat_format == perflibs_format_dense ||
             impl_C->spmat_format == perflibs_format_null)) {
 
-    // Change layout of sparse A if needed - convert to match a row-wise sparse
-    // matrix given the transpose options, and then create a CSR view of that
-    perflibs_csr<T> csr_view{};
-    if (transA == PERFLIBS_OPERATION_NOTRANS ||
-        transA == PERFLIBS_OPERATION_CONJNOTRANS) {
-      convert(perflibs_format_csr, impl_A);
-      // Populate the view - call non-data copying constructor
-      csr_view = std::move(perflibs_csr<T>(
-          impl_A->m, impl_A->n, impl_A->csr.vals_ptr, impl_A->csr.row_ptr_ptr,
-          impl_A->csr.col_indx_ptr, {}));
-    } else { // if (transA == PERFLIBS_OPERATION_TRANS || transA ==
-             // PERFLIBS_OPERATION_CONJTRANS)
-      convert(perflibs_format_csc, impl_A);
-      // Populate the view - call non-data copying constructor
-      csr_view = std::move(perflibs_csr<T>(
-          impl_A->n, impl_A->m, impl_A->csc.vals_ptr, impl_A->csc.col_ptr_ptr,
-          impl_A->csc.row_indx_ptr, {}));
+    const bool small_external_spmv =
+        n < spmm_spmv_nrhs_threshold && is_external_spmv_op(transA);
+    if (small_external_spmv && is_spmv_format(impl_A->spmat_format)) {
+      // Keep the original dense layouts and pack only genuinely strided
+      // columns. Column-major output lets SpMV write each column directly.
+      if (c_is_null) {
+        std::vector<T> null_vals(m * n);
+        auto dense_holder = create_new_matrix<T>();
+        auto status = fill_initial_data_dense<T>(
+            dense_holder.get(), PERFLIBS_COL_MAJOR, m, n, m, 0,
+            null_vals.data(), /*nocopy=*/false);
+        if (status != PERFLIBS_STATUS_SUCCESS) {
+          return status;
+        }
+        *C = std::move(*dense_holder);
+        impl_C = reinterpret_cast<perflibs_spmat_impl_t<T> *>(C->impl);
+        impl_C->dense.matrix_is_zero = true;
+      } else {
+        impl_C->dense.make_writable();
+      }
+
+      if (!exec) {
+        const auto spmv_op = to_external_enum(transA);
+        if (impl_A->userhint_spmv_op != spmv_op &&
+            impl_A->spmat_format == perflibs_format_csr) {
+          impl_A->csr.par_mv = {};
+        }
+        impl_A->userhint_spmv_op = spmv_op;
+        impl_A->userhint_spmv_invocations = impl_A->userhint_spmm_invocations;
+        auto status = spmv_optimize<T>(impl_A);
+        if (status != PERFLIBS_STATUS_SUCCESS) {
+          return status;
+        }
+        return PERFLIBS_STATUS_SUCCESS;
+      }
+
+      perflibs_int_t b_stride_row =
+          impl_B->dense.layout == PERFLIBS_ROW_MAJOR ? impl_B->dense.lda : 1;
+      perflibs_int_t b_stride_col =
+          impl_B->dense.layout == PERFLIBS_COL_MAJOR ? impl_B->dense.lda : 1;
+      if (transB == PERFLIBS_OPERATION_TRANS ||
+          transB == PERFLIBS_OPERATION_CONJTRANS) {
+        std::swap(b_stride_row, b_stride_col);
+      }
+      const perflibs_int_t c_stride_row =
+          impl_C->dense.layout == PERFLIBS_ROW_MAJOR ? impl_C->dense.lda : 1;
+      const perflibs_int_t c_stride_col =
+          impl_C->dense.layout == PERFLIBS_COL_MAJOR ? impl_C->dense.lda : 1;
+      const bool conjB = transB == PERFLIBS_OPERATION_CONJTRANS ||
+                         transB == PERFLIBS_OPERATION_CONJNOTRANS;
+
+      return spmm_repeated_spmv_exec_dense_columns<T>(
+          transA, conjB, alpha, A, k, m, impl_B->dense.vals_ptr, b_stride_row,
+          b_stride_col, beta, impl_C->dense.vals.data(), c_stride_row,
+          c_stride_col, n);
+    }
+    if (!exec && small_external_spmv) {
+      // Preserve an unsupported format so execution also follows the existing
+      // blocked-SpMM path instead of changing dispatch after optimization.
+      return PERFLIBS_STATUS_SUCCESS;
     }
 
     // Change layout of dense B if needed - requires new allocation and copies
@@ -495,13 +604,7 @@ perflibs_status_t spmm_exec_checked(enum sparse_hint_value_internal transA,
       }
     }
 
-    // From here we're all set with a CSR view of A, a dense row-major view of B
-    // and C is dense, row-major
-    if (!exec) {
-      return PERFLIBS_STATUS_SUCCESS;
-    }
-
-    // Now we can get on with computing something
+    // From here we're all set with dense row-major views of B and C.
     const T *B_vals = impl_B->dense.vals_ptr;
     const auto ldb = impl_B->dense.lda;
 
@@ -509,6 +612,27 @@ perflibs_status_t spmm_exec_checked(enum sparse_hint_value_internal transA,
                        transA == PERFLIBS_OPERATION_CONJNOTRANS;
     const bool conjB = transB == PERFLIBS_OPERATION_CONJTRANS ||
                        transB == PERFLIBS_OPERATION_CONJNOTRANS;
+
+    // Change layout of sparse A if needed - convert to match a row-wise sparse
+    // matrix given the transpose options, and then create a CSR view of that.
+    perflibs_csr<T> csr_view{};
+    if (transA == PERFLIBS_OPERATION_NOTRANS ||
+        transA == PERFLIBS_OPERATION_CONJNOTRANS) {
+      convert(perflibs_format_csr, impl_A);
+      csr_view = std::move(perflibs_csr<T>(
+          impl_A->m, impl_A->n, impl_A->csr.vals_ptr, impl_A->csr.row_ptr_ptr,
+          impl_A->csr.col_indx_ptr, {}));
+    } else { // if (transA == PERFLIBS_OPERATION_TRANS || transA ==
+             // PERFLIBS_OPERATION_CONJTRANS)
+      convert(perflibs_format_csc, impl_A);
+      csr_view = std::move(perflibs_csr<T>(
+          impl_A->n, impl_A->m, impl_A->csc.vals_ptr, impl_A->csc.col_ptr_ptr,
+          impl_A->csc.row_indx_ptr, {}));
+    }
+
+    if (!exec) {
+      return PERFLIBS_STATUS_SUCCESS;
+    }
 
     if (!conjA && !conjB) {
       spmm_rowwise_csr_blocked_m<T, false, false>(csr_view, B_vals, ldb, C_vals,

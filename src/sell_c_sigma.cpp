@@ -169,6 +169,7 @@ csr2scs(enum sparse_hint_value_internal trans, perflibs_int_t m,
 
   // Create the thing to return
   perflibs_scs<T> scs_ret(rows, cols, C, sigma, nthreads, kernels);
+  scs_ret.optimized_op = trans;
 
   bool do_sort = true;
   if (sigma == 0) {
@@ -980,8 +981,20 @@ spmat_update_scs(perflibs_spmat_impl_t<T> *impl, perflibs_int_t n_updates,
     } else if (col_num < 0 || col_num > ncols - 1) {
       return update_matrix_error(impl->error_handle, i + index_base);
     } else {
+      auto stored_row = row_num;
+      auto stored_col = col_num;
+      auto stored_val = vals[i];
+      if (impl->scs.optimized_op == PERFLIBS_OPERATION_TRANS ||
+          impl->scs.optimized_op == PERFLIBS_OPERATION_CONJTRANS) {
+        std::swap(stored_row, stored_col);
+      }
+      if (impl->scs.optimized_op == PERFLIBS_OPERATION_CONJNOTRANS ||
+          impl->scs.optimized_op == PERFLIBS_OPERATION_CONJTRANS) {
+        stored_val = perflibs::sparse::conj(stored_val);
+      }
+
       auto C = impl->scs.C;
-      auto pi = impl->scs.row_in2permd[row_num];
+      auto pi = impl->scs.row_in2permd[stored_row];
       auto cid = pi / C;
       auto r_cid = pi % C;
       auto offset = impl->scs.cs[cid] + r_cid;
@@ -991,8 +1004,8 @@ spmat_update_scs(perflibs_spmat_impl_t<T> *impl, perflibs_int_t n_updates,
           auto col_indx_off = reinterpret_cast<const int8_t *>(
               impl->scs.col_indx_offsets.data());
           if (col_indx_off[offset + j * C] + impl->scs.col_indx_min[cid] ==
-              col_num) {
-            impl->scs.vals[offset + j * C] = vals[i];
+              stored_col) {
+            impl->scs.vals[offset + j * C] = stored_val;
             success = true;
             break;
           }
@@ -1000,8 +1013,8 @@ spmat_update_scs(perflibs_spmat_impl_t<T> *impl, perflibs_int_t n_updates,
           auto col_indx_off = reinterpret_cast<const int16_t *>(
               impl->scs.col_indx_offsets.data());
           if (col_indx_off[offset + j * C] + impl->scs.col_indx_min[cid] ==
-              col_num) {
-            impl->scs.vals[offset + j * C] = vals[i];
+              stored_col) {
+            impl->scs.vals[offset + j * C] = stored_val;
             success = true;
             break;
           }
@@ -1009,8 +1022,8 @@ spmat_update_scs(perflibs_spmat_impl_t<T> *impl, perflibs_int_t n_updates,
           auto col_indx_off = reinterpret_cast<const int32_t *>(
               impl->scs.col_indx_offsets.data());
           if (col_indx_off[offset + j * C] + impl->scs.col_indx_min[cid] ==
-              col_num) {
-            impl->scs.vals[offset + j * C] = vals[i];
+              stored_col) {
+            impl->scs.vals[offset + j * C] = stored_val;
             success = true;
             break;
           }
@@ -1018,8 +1031,8 @@ spmat_update_scs(perflibs_spmat_impl_t<T> *impl, perflibs_int_t n_updates,
           auto col_indx_off = reinterpret_cast<const int64_t *>(
               impl->scs.col_indx_offsets.data());
           if (col_indx_off[offset + j * C] + impl->scs.col_indx_min[cid] ==
-              col_num) {
-            impl->scs.vals[offset + j * C] = vals[i];
+              stored_col) {
+            impl->scs.vals[offset + j * C] = stored_val;
             success = true;
             break;
           }

@@ -6,9 +6,11 @@
  */
 
 #include "supernodal.hpp"
+#include "compressed_sparse_columns.hpp"
 #include "compressed_sparse_rows.hpp"
 #include "convert.hpp"
 #include "int.hpp"
+#include "matmul.hpp"
 #include "matvec.hpp"
 #include "object_helpers.hpp"
 #include "solve.hpp"
@@ -1193,6 +1195,847 @@ void spsv_trans_supernodal_serial_lt(
 }
 
 template <typename T>
+void copy_strided_dense_to_row_major(T *dst, const T *src, perflibs_int_t nrows,
+                                     perflibs_int_t nrhs,
+                                     perflibs_int_t src_stride_row,
+                                     perflibs_int_t src_stride_col) {
+  for (perflibs_int_t row = 0; row < nrows; ++row) {
+    for (perflibs_int_t col = 0; col < nrhs; ++col) {
+      dst[row * nrhs + col] = src[row * src_stride_row + col * src_stride_col];
+    }
+  }
+}
+
+template <typename T>
+void copy_row_major_to_strided_dense(T *dst, const T *src, perflibs_int_t nrows,
+                                     perflibs_int_t nrhs,
+                                     perflibs_int_t dst_stride_row,
+                                     perflibs_int_t dst_stride_col) {
+  for (perflibs_int_t row = 0; row < nrows; ++row) {
+    for (perflibs_int_t col = 0; col < nrhs; ++col) {
+      dst[row * dst_stride_row + col * dst_stride_col] = src[row * nrhs + col];
+    }
+  }
+}
+
+template <typename T>
+std::unique_ptr<perflibs_spmat_top_t>
+make_row_major_dense_matrix(perflibs_int_t rows, perflibs_int_t cols,
+                            const T *vals, perflibs_int_t flags) {
+  perflibs_spmat_top_t *mat = nullptr;
+  [[maybe_unused]] auto stat = create_spmat_top_dense<T>(
+      &mat, PERFLIBS_ROW_MAJOR, rows, cols, cols, 0, vals, flags);
+  assert(stat == PERFLIBS_STATUS_SUCCESS);
+  return std::unique_ptr<perflibs_spmat_top_t>(mat);
+}
+
+template <typename T>
+void copy_row_major_dense_matrix_values(perflibs_spmat_top_t *mat, T *dst,
+                                        perflibs_int_t count) {
+  auto impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(mat->impl);
+  assert(impl->spmat_format == perflibs_format_dense);
+  assert(impl->dense.layout == PERFLIBS_ROW_MAJOR);
+  std::memcpy(dst, impl->dense.vals_ptr, sizeof(T) * count);
+}
+
+template <typename T>
+void spsm_supernodal_serial_lt_notrans(perflibs_supernodal<T> &supernodal, T *X,
+                                       perflibs_int_t x_stride_row,
+                                       perflibs_int_t x_stride_col, T alpha,
+                                       const T *Y, perflibs_int_t y_stride_row,
+                                       perflibs_int_t y_stride_col,
+                                       perflibs_int_t nrhs) {
+  const perflibs_int_t n = supernodal.n;
+  const perflibs_int_t sep_indx = supernodal.low_sep - supernodal.index_base;
+  auto impl_sep =
+      reinterpret_cast<perflibs_spmat_impl_t<T> *>(supernodal.separator->impl);
+  const perflibs_int_t sep_dim = impl_sep->m;
+
+  const bool x_is_row_major = x_stride_row == nrhs && x_stride_col == 1;
+  const bool y_is_row_major = y_stride_row == nrhs && y_stride_col == 1;
+
+  perflibs::sparse::pod_vector<T> y_work;
+  const T *y_work_ptr = Y;
+  if (!y_is_row_major) {
+    y_work.resize(n * nrhs);
+    copy_strided_dense_to_row_major(y_work.data(), Y, n, nrhs, y_stride_row,
+                                    y_stride_col);
+    y_work_ptr = y_work.data();
+  }
+
+  std::vector<std::unique_ptr<perflibs_spmat_top_t>> X_blocks;
+  X_blocks.reserve(supernodal.mats_diag.size());
+
+  perflibs_int_t off = 0;
+  for (size_t i = 0; i < supernodal.mats_diag.size(); ++i) {
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    const auto block_rows = diag_impl->m;
+    // The solve overwrites X_block, so seed its owned storage from initialized
+    // Y values rather than reading from the caller's output buffer.
+    auto X_block = make_row_major_dense_matrix<T>(block_rows, nrhs,
+                                                  y_work_ptr + off * nrhs, 0);
+    auto Y_block = make_row_major_dense_matrix<T>(
+        block_rows, nrhs, y_work_ptr + off * nrhs,
+        PERFLIBS_SPARSE_CREATE_NOCOPY);
+    [[maybe_unused]] auto stat = spsm_exec<T>(
+        PERFLIBS_SPARSE_OPERATION_NOTRANS, supernodal.mats_diag[i].get(),
+        X_block.get(), alpha, Y_block.get());
+    assert(stat == PERFLIBS_STATUS_SUCCESS);
+    X_blocks.push_back(std::move(X_block));
+
+    off += block_rows;
+  }
+
+  auto X_sep = make_row_major_dense_matrix<T>(sep_dim, nrhs,
+                                              y_work_ptr + sep_indx * nrhs, 0);
+  auto X_sep_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(X_sep->impl);
+  for (perflibs_int_t i = 0; i < sep_dim * nrhs; ++i) {
+    X_sep_impl->dense.vals[i] *= alpha;
+  }
+  for (size_t i = 0; i < supernodal.mats_sep.size(); ++i) {
+    [[maybe_unused]] auto stat = spmm_exec<T>(
+        PERFLIBS_SPARSE_OPERATION_NOTRANS, PERFLIBS_SPARSE_OPERATION_NOTRANS,
+        T(-1), supernodal.mats_sep[i].get(), X_blocks[i].get(), T(1),
+        X_sep.get());
+    assert(stat == PERFLIBS_STATUS_SUCCESS);
+  }
+
+  [[maybe_unused]] auto stat =
+      spsm_exec<T>(PERFLIBS_SPARSE_OPERATION_NOTRANS,
+                   supernodal.separator.get(), X_sep.get(), T(1), X_sep.get());
+  assert(stat == PERFLIBS_STATUS_SUCCESS);
+
+  perflibs::sparse::pod_vector<T> x_work;
+  T *x_work_ptr = X;
+  if (!x_is_row_major) {
+    x_work.resize(n * nrhs);
+    x_work_ptr = x_work.data();
+  }
+
+  off = 0;
+  for (size_t i = 0; i < X_blocks.size(); ++i) {
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    copy_row_major_dense_matrix_values<T>(
+        X_blocks[i].get(), x_work_ptr + off * nrhs, diag_impl->m * nrhs);
+    off += diag_impl->m;
+  }
+  copy_row_major_dense_matrix_values<T>(
+      X_sep.get(), x_work_ptr + sep_indx * nrhs, sep_dim * nrhs);
+
+  if (!x_is_row_major) {
+    copy_row_major_to_strided_dense(X, x_work.data(), n, nrhs, x_stride_row,
+                                    x_stride_col);
+  }
+}
+
+template <typename T>
+void spsm_supernodal_serial_lt_trans(perflibs_supernodal<T> &supernodal,
+                                     perflibs_sparse_hint_value trans, T *X,
+                                     perflibs_int_t x_stride_row,
+                                     perflibs_int_t x_stride_col, T alpha,
+                                     const T *Y, perflibs_int_t y_stride_row,
+                                     perflibs_int_t y_stride_col,
+                                     perflibs_int_t nrhs) {
+  const perflibs_int_t n = supernodal.n;
+  const perflibs_int_t sep_indx = supernodal.low_sep - supernodal.index_base;
+  auto impl_sep =
+      reinterpret_cast<perflibs_spmat_impl_t<T> *>(supernodal.separator->impl);
+  const perflibs_int_t sep_dim = impl_sep->m;
+
+  const bool x_is_row_major = x_stride_row == nrhs && x_stride_col == 1;
+  const bool y_is_row_major = y_stride_row == nrhs && y_stride_col == 1;
+
+  perflibs::sparse::pod_vector<T> y_work;
+  const T *y_work_ptr = Y;
+  if (!y_is_row_major) {
+    y_work.resize(n * nrhs);
+    copy_strided_dense_to_row_major(y_work.data(), Y, n, nrhs, y_stride_row,
+                                    y_stride_col);
+    y_work_ptr = y_work.data();
+  }
+
+  auto X_sep = make_row_major_dense_matrix<T>(sep_dim, nrhs,
+                                              y_work_ptr + sep_indx * nrhs, 0);
+  auto Y_sep = make_row_major_dense_matrix<T>(sep_dim, nrhs,
+                                              y_work_ptr + sep_indx * nrhs,
+                                              PERFLIBS_SPARSE_CREATE_NOCOPY);
+  [[maybe_unused]] auto stat = spsm_exec<T>(trans, supernodal.separator.get(),
+                                            X_sep.get(), alpha, Y_sep.get());
+  assert(stat == PERFLIBS_STATUS_SUCCESS);
+
+  std::vector<std::unique_ptr<perflibs_spmat_top_t>> X_blocks;
+  X_blocks.reserve(supernodal.mats_diag.size());
+
+  perflibs_int_t off = 0;
+  for (size_t i = 0; i < supernodal.mats_diag.size(); ++i) {
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    const auto block_rows = diag_impl->m;
+
+    // X_block starts as alpha * Y so the off-diagonal update is not scaled
+    // again by the subsequent diagonal solve.
+    auto X_block = make_row_major_dense_matrix<T>(block_rows, nrhs,
+                                                  y_work_ptr + off * nrhs, 0);
+    auto X_block_impl =
+        reinterpret_cast<perflibs_spmat_impl_t<T> *>(X_block->impl);
+    for (perflibs_int_t j = 0; j < block_rows * nrhs; ++j) {
+      X_block_impl->dense.vals[j] *= alpha;
+    }
+    [[maybe_unused]] auto spmm_stat = spmm_exec<T>(
+        trans, PERFLIBS_SPARSE_OPERATION_NOTRANS, T(-1),
+        supernodal.mats_sep[i].get(), X_sep.get(), T(1), X_block.get());
+    assert(spmm_stat == PERFLIBS_STATUS_SUCCESS);
+
+    [[maybe_unused]] auto spsm_stat =
+        spsm_exec<T>(trans, supernodal.mats_diag[i].get(), X_block.get(), T(1),
+                     X_block.get());
+    assert(spsm_stat == PERFLIBS_STATUS_SUCCESS);
+    X_blocks.push_back(std::move(X_block));
+
+    off += block_rows;
+  }
+
+  perflibs::sparse::pod_vector<T> x_work;
+  T *x_work_ptr = X;
+  if (!x_is_row_major) {
+    x_work.resize(n * nrhs);
+    x_work_ptr = x_work.data();
+  }
+
+  off = 0;
+  for (size_t i = 0; i < X_blocks.size(); ++i) {
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    copy_row_major_dense_matrix_values<T>(
+        X_blocks[i].get(), x_work_ptr + off * nrhs, diag_impl->m * nrhs);
+    off += diag_impl->m;
+  }
+  copy_row_major_dense_matrix_values<T>(
+      X_sep.get(), x_work_ptr + sep_indx * nrhs, sep_dim * nrhs);
+
+  if (!x_is_row_major) {
+    copy_row_major_to_strided_dense(X, x_work.data(), n, nrhs, x_stride_row,
+                                    x_stride_col);
+  }
+}
+
+template <typename T>
+void spsm_supernodal_parallel_lt_notrans(perflibs_supernodal<T> &supernodal,
+                                         T *X, perflibs_int_t x_stride_row,
+                                         perflibs_int_t x_stride_col, T alpha,
+                                         const T *Y,
+                                         perflibs_int_t y_stride_row,
+                                         perflibs_int_t y_stride_col,
+                                         perflibs_int_t nrhs) {
+  const perflibs_int_t n = supernodal.n;
+  const perflibs_int_t sep_indx = supernodal.low_sep - supernodal.index_base;
+  auto impl_sep =
+      reinterpret_cast<perflibs_spmat_impl_t<T> *>(supernodal.separator->impl);
+  const perflibs_int_t sep_dim = impl_sep->m;
+
+  const bool x_is_row_major = x_stride_row == nrhs && x_stride_col == 1;
+  const bool y_is_row_major = y_stride_row == nrhs && y_stride_col == 1;
+
+  perflibs::sparse::pod_vector<T> y_work;
+  const T *y_work_ptr = Y;
+  if (!y_is_row_major) {
+    y_work.resize(n * nrhs);
+    copy_strided_dense_to_row_major(y_work.data(), Y, n, nrhs, y_stride_row,
+                                    y_stride_col);
+    y_work_ptr = y_work.data();
+  }
+
+  std::vector<size_t> offsets(supernodal.mats_diag.size());
+  for (size_t i = 1; i < offsets.size(); ++i) {
+    offsets[i] = offsets[i - 1] + reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+                                      supernodal.mats_diag[i - 1]->impl)
+                                      ->m;
+  }
+
+  std::vector<std::unique_ptr<perflibs_spmat_top_t>> X_blocks(
+      supernodal.mats_diag.size());
+  // Give each thread a private separator accumulator so SpMM updates do not
+  // race without allocating one dense contribution matrix per diagonal block.
+  std::vector<std::unique_ptr<perflibs_spmat_top_t>> sep_contribs(
+      perflibs::sparse::omp::get_max_threads());
+  {
+    // An initial dummy array which gets copied into each dense matrix in the
+    // loop below
+    std::vector<T> init_zero_sep_contrib_vals((size_t)sep_dim * (size_t)nrhs);
+    for (auto &sep_contrib : sep_contribs) {
+      sep_contrib = make_row_major_dense_matrix<T>(
+          sep_dim, nrhs, init_zero_sep_contrib_vals.data(), 0);
+    }
+  }
+
+#pragma omp parallel for
+  for (size_t i = 0; i < supernodal.mats_diag.size(); ++i) {
+    const auto off = offsets[i];
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    const auto block_rows = diag_impl->m;
+
+    // The solve overwrites X_block, so seed its owned storage from initialized
+    // Y values rather than reading from the caller's output buffer.
+    auto X_block = make_row_major_dense_matrix<T>(block_rows, nrhs,
+                                                  y_work_ptr + off * nrhs, 0);
+    auto Y_block = make_row_major_dense_matrix<T>(
+        block_rows, nrhs, y_work_ptr + off * nrhs,
+        PERFLIBS_SPARSE_CREATE_NOCOPY);
+    [[maybe_unused]] auto spsm_stat = spsm_exec<T>(
+        PERFLIBS_SPARSE_OPERATION_NOTRANS, supernodal.mats_diag[i].get(),
+        X_block.get(), alpha, Y_block.get());
+    assert(spsm_stat == PERFLIBS_STATUS_SUCCESS);
+
+    auto &sep_contrib = sep_contribs[perflibs::sparse::omp::get_thread_num()];
+    [[maybe_unused]] auto spmm_stat = spmm_exec<T>(
+        PERFLIBS_SPARSE_OPERATION_NOTRANS, PERFLIBS_SPARSE_OPERATION_NOTRANS,
+        T(1), supernodal.mats_sep[i].get(), X_block.get(), T(1),
+        sep_contrib.get());
+    assert(spmm_stat == PERFLIBS_STATUS_SUCCESS);
+
+    X_blocks[i] = std::move(X_block);
+  }
+
+  auto X_sep = make_row_major_dense_matrix<T>(sep_dim, nrhs,
+                                              y_work_ptr + sep_indx * nrhs, 0);
+  auto X_sep_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(X_sep->impl);
+  T *x_sep_vals = X_sep_impl->dense.vals.data();
+  for (perflibs_int_t i = 0; i < sep_dim * nrhs; ++i) {
+    x_sep_vals[i] *= alpha;
+  }
+  for (const auto &sep_contrib : sep_contribs) {
+    auto sep_contrib_impl =
+        reinterpret_cast<perflibs_spmat_impl_t<T> *>(sep_contrib->impl);
+    const T *contrib_vals = sep_contrib_impl->dense.vals_ptr;
+    for (perflibs_int_t i = 0; i < sep_dim * nrhs; ++i) {
+      x_sep_vals[i] -= contrib_vals[i];
+    }
+  }
+
+  [[maybe_unused]] auto stat =
+      spsm_exec<T>(PERFLIBS_SPARSE_OPERATION_NOTRANS,
+                   supernodal.separator.get(), X_sep.get(), T(1), X_sep.get());
+  assert(stat == PERFLIBS_STATUS_SUCCESS);
+
+  perflibs::sparse::pod_vector<T> x_work;
+  T *x_work_ptr = X;
+  if (!x_is_row_major) {
+    x_work.resize(n * nrhs);
+    x_work_ptr = x_work.data();
+  }
+
+  for (size_t i = 0; i < X_blocks.size(); ++i) {
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    copy_row_major_dense_matrix_values<T>(
+        X_blocks[i].get(), x_work_ptr + offsets[i] * nrhs, diag_impl->m * nrhs);
+  }
+  copy_row_major_dense_matrix_values<T>(
+      X_sep.get(), x_work_ptr + sep_indx * nrhs, sep_dim * nrhs);
+
+  if (!x_is_row_major) {
+    copy_row_major_to_strided_dense(X, x_work.data(), n, nrhs, x_stride_row,
+                                    x_stride_col);
+  }
+}
+
+template <typename T>
+void spsm_supernodal_parallel_lt_trans(perflibs_supernodal<T> &supernodal,
+                                       perflibs_sparse_hint_value trans, T *X,
+                                       perflibs_int_t x_stride_row,
+                                       perflibs_int_t x_stride_col, T alpha,
+                                       const T *Y, perflibs_int_t y_stride_row,
+                                       perflibs_int_t y_stride_col,
+                                       perflibs_int_t nrhs) {
+  const perflibs_int_t n = supernodal.n;
+  const perflibs_int_t sep_indx = supernodal.low_sep - supernodal.index_base;
+  auto impl_sep =
+      reinterpret_cast<perflibs_spmat_impl_t<T> *>(supernodal.separator->impl);
+  const perflibs_int_t sep_dim = impl_sep->m;
+
+  const bool x_is_row_major = x_stride_row == nrhs && x_stride_col == 1;
+  const bool y_is_row_major = y_stride_row == nrhs && y_stride_col == 1;
+
+  perflibs::sparse::pod_vector<T> y_work;
+  const T *y_work_ptr = Y;
+  if (!y_is_row_major) {
+    y_work.resize(n * nrhs);
+    copy_strided_dense_to_row_major(y_work.data(), Y, n, nrhs, y_stride_row,
+                                    y_stride_col);
+    y_work_ptr = y_work.data();
+  }
+
+  std::vector<size_t> offsets(supernodal.mats_diag.size());
+  for (size_t i = 1; i < offsets.size(); ++i) {
+    offsets[i] = offsets[i - 1] + reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+                                      supernodal.mats_diag[i - 1]->impl)
+                                      ->m;
+  }
+
+  auto X_sep = make_row_major_dense_matrix<T>(sep_dim, nrhs,
+                                              y_work_ptr + sep_indx * nrhs, 0);
+  auto Y_sep = make_row_major_dense_matrix<T>(sep_dim, nrhs,
+                                              y_work_ptr + sep_indx * nrhs,
+                                              PERFLIBS_SPARSE_CREATE_NOCOPY);
+  [[maybe_unused]] auto stat = spsm_exec<T>(trans, supernodal.separator.get(),
+                                            X_sep.get(), alpha, Y_sep.get());
+  assert(stat == PERFLIBS_STATUS_SUCCESS);
+
+  std::vector<std::unique_ptr<perflibs_spmat_top_t>> X_blocks(
+      supernodal.mats_diag.size());
+
+#pragma omp parallel for
+  for (size_t i = 0; i < supernodal.mats_diag.size(); ++i) {
+    const auto off = offsets[i];
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    const auto block_rows = diag_impl->m;
+
+    // X_block starts as alpha * Y so the off-diagonal update is not scaled
+    // again by the subsequent diagonal solve.
+    auto X_block = make_row_major_dense_matrix<T>(block_rows, nrhs,
+                                                  y_work_ptr + off * nrhs, 0);
+    auto X_block_impl =
+        reinterpret_cast<perflibs_spmat_impl_t<T> *>(X_block->impl);
+    for (perflibs_int_t j = 0; j < block_rows * nrhs; ++j) {
+      X_block_impl->dense.vals[j] *= alpha;
+    }
+    [[maybe_unused]] auto spmm_stat = spmm_exec<T>(
+        trans, PERFLIBS_SPARSE_OPERATION_NOTRANS, T(-1),
+        supernodal.mats_sep[i].get(), X_sep.get(), T(1), X_block.get());
+    assert(spmm_stat == PERFLIBS_STATUS_SUCCESS);
+
+    [[maybe_unused]] auto spsm_stat =
+        spsm_exec<T>(trans, supernodal.mats_diag[i].get(), X_block.get(), T(1),
+                     X_block.get());
+    assert(spsm_stat == PERFLIBS_STATUS_SUCCESS);
+
+    X_blocks[i] = std::move(X_block);
+  }
+
+  perflibs::sparse::pod_vector<T> x_work;
+  T *x_work_ptr = X;
+  if (!x_is_row_major) {
+    x_work.resize(n * nrhs);
+    x_work_ptr = x_work.data();
+  }
+
+  for (size_t i = 0; i < X_blocks.size(); ++i) {
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    copy_row_major_dense_matrix_values<T>(
+        X_blocks[i].get(), x_work_ptr + offsets[i] * nrhs, diag_impl->m * nrhs);
+  }
+  copy_row_major_dense_matrix_values<T>(
+      X_sep.get(), x_work_ptr + sep_indx * nrhs, sep_dim * nrhs);
+
+  if (!x_is_row_major) {
+    copy_row_major_to_strided_dense(X, x_work.data(), n, nrhs, x_stride_row,
+                                    x_stride_col);
+  }
+}
+
+template <typename T>
+void spsm_supernodal_serial_ut_notrans(perflibs_supernodal<T> &supernodal, T *X,
+                                       perflibs_int_t x_stride_row,
+                                       perflibs_int_t x_stride_col, T alpha,
+                                       const T *Y, perflibs_int_t y_stride_row,
+                                       perflibs_int_t y_stride_col,
+                                       perflibs_int_t nrhs) {
+  const perflibs_int_t n = supernodal.n;
+  auto impl_sep =
+      reinterpret_cast<perflibs_spmat_impl_t<T> *>(supernodal.separator->impl);
+  const perflibs_int_t sep_dim = impl_sep->m;
+
+  const bool x_is_row_major = x_stride_row == nrhs && x_stride_col == 1;
+  const bool y_is_row_major = y_stride_row == nrhs && y_stride_col == 1;
+
+  perflibs::sparse::pod_vector<T> y_work;
+  const T *y_work_ptr = Y;
+  if (!y_is_row_major) {
+    y_work.resize(n * nrhs);
+    copy_strided_dense_to_row_major(y_work.data(), Y, n, nrhs, y_stride_row,
+                                    y_stride_col);
+    y_work_ptr = y_work.data();
+  }
+
+  std::vector<std::unique_ptr<perflibs_spmat_top_t>> X_blocks;
+  X_blocks.reserve(supernodal.mats_diag.size());
+
+  perflibs_int_t off = sep_dim;
+  for (size_t i = 0; i < supernodal.mats_diag.size(); ++i) {
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    const auto block_rows = diag_impl->m;
+
+    // The solve overwrites X_block, so seed its owned storage from initialized
+    // Y values rather than reading from the caller's output buffer.
+    auto X_block = make_row_major_dense_matrix<T>(block_rows, nrhs,
+                                                  y_work_ptr + off * nrhs, 0);
+    auto Y_block = make_row_major_dense_matrix<T>(
+        block_rows, nrhs, y_work_ptr + off * nrhs,
+        PERFLIBS_SPARSE_CREATE_NOCOPY);
+    [[maybe_unused]] auto stat = spsm_exec<T>(
+        PERFLIBS_SPARSE_OPERATION_NOTRANS, supernodal.mats_diag[i].get(),
+        X_block.get(), alpha, Y_block.get());
+    assert(stat == PERFLIBS_STATUS_SUCCESS);
+    X_blocks.push_back(std::move(X_block));
+
+    off += block_rows;
+  }
+
+  auto X_sep = make_row_major_dense_matrix<T>(sep_dim, nrhs, y_work_ptr, 0);
+  auto X_sep_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(X_sep->impl);
+  for (perflibs_int_t i = 0; i < sep_dim * nrhs; ++i) {
+    X_sep_impl->dense.vals[i] *= alpha;
+  }
+  for (size_t i = 0; i < supernodal.mats_sep.size(); ++i) {
+    [[maybe_unused]] auto stat = spmm_exec<T>(
+        PERFLIBS_SPARSE_OPERATION_NOTRANS, PERFLIBS_SPARSE_OPERATION_NOTRANS,
+        T(-1), supernodal.mats_sep[i].get(), X_blocks[i].get(), T(1),
+        X_sep.get());
+    assert(stat == PERFLIBS_STATUS_SUCCESS);
+  }
+
+  [[maybe_unused]] auto stat =
+      spsm_exec<T>(PERFLIBS_SPARSE_OPERATION_NOTRANS,
+                   supernodal.separator.get(), X_sep.get(), T(1), X_sep.get());
+  assert(stat == PERFLIBS_STATUS_SUCCESS);
+
+  perflibs::sparse::pod_vector<T> x_work;
+  T *x_work_ptr = X;
+  if (!x_is_row_major) {
+    x_work.resize(n * nrhs);
+    x_work_ptr = x_work.data();
+  }
+
+  copy_row_major_dense_matrix_values<T>(X_sep.get(), x_work_ptr,
+                                        sep_dim * nrhs);
+  off = sep_dim;
+  for (size_t i = 0; i < X_blocks.size(); ++i) {
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    copy_row_major_dense_matrix_values<T>(
+        X_blocks[i].get(), x_work_ptr + off * nrhs, diag_impl->m * nrhs);
+    off += diag_impl->m;
+  }
+
+  if (!x_is_row_major) {
+    copy_row_major_to_strided_dense(X, x_work.data(), n, nrhs, x_stride_row,
+                                    x_stride_col);
+  }
+}
+
+template <typename T>
+void spsm_supernodal_serial_ut_trans(perflibs_supernodal<T> &supernodal,
+                                     perflibs_sparse_hint_value trans, T *X,
+                                     perflibs_int_t x_stride_row,
+                                     perflibs_int_t x_stride_col, T alpha,
+                                     const T *Y, perflibs_int_t y_stride_row,
+                                     perflibs_int_t y_stride_col,
+                                     perflibs_int_t nrhs) {
+  const perflibs_int_t n = supernodal.n;
+  auto impl_sep =
+      reinterpret_cast<perflibs_spmat_impl_t<T> *>(supernodal.separator->impl);
+  const perflibs_int_t sep_dim = impl_sep->m;
+
+  const bool x_is_row_major = x_stride_row == nrhs && x_stride_col == 1;
+  const bool y_is_row_major = y_stride_row == nrhs && y_stride_col == 1;
+
+  perflibs::sparse::pod_vector<T> y_work;
+  const T *y_work_ptr = Y;
+  if (!y_is_row_major) {
+    y_work.resize(n * nrhs);
+    copy_strided_dense_to_row_major(y_work.data(), Y, n, nrhs, y_stride_row,
+                                    y_stride_col);
+    y_work_ptr = y_work.data();
+  }
+
+  auto X_sep = make_row_major_dense_matrix<T>(sep_dim, nrhs, y_work_ptr, 0);
+  auto Y_sep = make_row_major_dense_matrix<T>(sep_dim, nrhs, y_work_ptr,
+                                              PERFLIBS_SPARSE_CREATE_NOCOPY);
+  [[maybe_unused]] auto stat = spsm_exec<T>(trans, supernodal.separator.get(),
+                                            X_sep.get(), alpha, Y_sep.get());
+  assert(stat == PERFLIBS_STATUS_SUCCESS);
+
+  std::vector<std::unique_ptr<perflibs_spmat_top_t>> X_blocks;
+  X_blocks.reserve(supernodal.mats_diag.size());
+
+  perflibs_int_t off = sep_dim;
+  for (size_t i = 0; i < supernodal.mats_diag.size(); ++i) {
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    const auto block_rows = diag_impl->m;
+
+    // X_block starts as alpha * Y so the off-diagonal update is not scaled
+    // again by the subsequent diagonal solve.
+    auto X_block = make_row_major_dense_matrix<T>(block_rows, nrhs,
+                                                  y_work_ptr + off * nrhs, 0);
+    auto X_block_impl =
+        reinterpret_cast<perflibs_spmat_impl_t<T> *>(X_block->impl);
+    for (perflibs_int_t j = 0; j < block_rows * nrhs; ++j) {
+      X_block_impl->dense.vals[j] *= alpha;
+    }
+    [[maybe_unused]] auto spmm_stat = spmm_exec<T>(
+        trans, PERFLIBS_SPARSE_OPERATION_NOTRANS, T(-1),
+        supernodal.mats_sep[i].get(), X_sep.get(), T(1), X_block.get());
+    assert(spmm_stat == PERFLIBS_STATUS_SUCCESS);
+
+    [[maybe_unused]] auto spsm_stat =
+        spsm_exec<T>(trans, supernodal.mats_diag[i].get(), X_block.get(), T(1),
+                     X_block.get());
+    assert(spsm_stat == PERFLIBS_STATUS_SUCCESS);
+    X_blocks.push_back(std::move(X_block));
+
+    off += block_rows;
+  }
+
+  perflibs::sparse::pod_vector<T> x_work;
+  T *x_work_ptr = X;
+  if (!x_is_row_major) {
+    x_work.resize(n * nrhs);
+    x_work_ptr = x_work.data();
+  }
+
+  copy_row_major_dense_matrix_values<T>(X_sep.get(), x_work_ptr,
+                                        sep_dim * nrhs);
+  off = sep_dim;
+  for (size_t i = 0; i < X_blocks.size(); ++i) {
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    copy_row_major_dense_matrix_values<T>(
+        X_blocks[i].get(), x_work_ptr + off * nrhs, diag_impl->m * nrhs);
+    off += diag_impl->m;
+  }
+
+  if (!x_is_row_major) {
+    copy_row_major_to_strided_dense(X, x_work.data(), n, nrhs, x_stride_row,
+                                    x_stride_col);
+  }
+}
+
+template <typename T>
+void spsm_supernodal_parallel_ut_notrans(perflibs_supernodal<T> &supernodal,
+                                         T *X, perflibs_int_t x_stride_row,
+                                         perflibs_int_t x_stride_col, T alpha,
+                                         const T *Y,
+                                         perflibs_int_t y_stride_row,
+                                         perflibs_int_t y_stride_col,
+                                         perflibs_int_t nrhs) {
+  const perflibs_int_t n = supernodal.n;
+  auto impl_sep =
+      reinterpret_cast<perflibs_spmat_impl_t<T> *>(supernodal.separator->impl);
+  const perflibs_int_t sep_dim = impl_sep->m;
+
+  const bool x_is_row_major = x_stride_row == nrhs && x_stride_col == 1;
+  const bool y_is_row_major = y_stride_row == nrhs && y_stride_col == 1;
+
+  perflibs::sparse::pod_vector<T> y_work;
+  const T *y_work_ptr = Y;
+  if (!y_is_row_major) {
+    y_work.resize(n * nrhs);
+    copy_strided_dense_to_row_major(y_work.data(), Y, n, nrhs, y_stride_row,
+                                    y_stride_col);
+    y_work_ptr = y_work.data();
+  }
+
+  std::vector<size_t> offsets(supernodal.mats_diag.size());
+  if (!offsets.empty()) {
+    offsets[0] = sep_dim;
+  }
+  for (size_t i = 1; i < offsets.size(); ++i) {
+    offsets[i] = offsets[i - 1] + reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+                                      supernodal.mats_diag[i - 1]->impl)
+                                      ->m;
+  }
+
+  std::vector<std::unique_ptr<perflibs_spmat_top_t>> X_blocks(
+      supernodal.mats_diag.size());
+  // Give each thread a private separator accumulator so SpMM updates do not
+  // race without allocating one dense contribution matrix per diagonal block.
+  std::vector<std::unique_ptr<perflibs_spmat_top_t>> sep_contribs(
+      perflibs::sparse::omp::get_max_threads());
+  {
+    // An initial dummy array which gets copied into each dense matrix in the
+    // loop below
+    std::vector<T> init_zero_sep_contrib_vals((size_t)sep_dim * (size_t)nrhs);
+    for (auto &sep_contrib : sep_contribs) {
+      sep_contrib = make_row_major_dense_matrix<T>(
+          sep_dim, nrhs, init_zero_sep_contrib_vals.data(), 0);
+    }
+  }
+
+#pragma omp parallel for
+  for (size_t i = 0; i < supernodal.mats_diag.size(); ++i) {
+    const auto off = offsets[i];
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    const auto block_rows = diag_impl->m;
+
+    // The solve overwrites X_block, so seed its owned storage from initialized
+    // Y values rather than reading from the caller's output buffer.
+    auto X_block = make_row_major_dense_matrix<T>(block_rows, nrhs,
+                                                  y_work_ptr + off * nrhs, 0);
+    auto Y_block = make_row_major_dense_matrix<T>(
+        block_rows, nrhs, y_work_ptr + off * nrhs,
+        PERFLIBS_SPARSE_CREATE_NOCOPY);
+    [[maybe_unused]] auto spsm_stat = spsm_exec<T>(
+        PERFLIBS_SPARSE_OPERATION_NOTRANS, supernodal.mats_diag[i].get(),
+        X_block.get(), alpha, Y_block.get());
+    assert(spsm_stat == PERFLIBS_STATUS_SUCCESS);
+
+    auto &sep_contrib = sep_contribs[perflibs::sparse::omp::get_thread_num()];
+    [[maybe_unused]] auto spmm_stat = spmm_exec<T>(
+        PERFLIBS_SPARSE_OPERATION_NOTRANS, PERFLIBS_SPARSE_OPERATION_NOTRANS,
+        T(1), supernodal.mats_sep[i].get(), X_block.get(), T(1),
+        sep_contrib.get());
+    assert(spmm_stat == PERFLIBS_STATUS_SUCCESS);
+
+    X_blocks[i] = std::move(X_block);
+  }
+
+  auto X_sep = make_row_major_dense_matrix<T>(sep_dim, nrhs, y_work_ptr, 0);
+  auto X_sep_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(X_sep->impl);
+  T *x_sep_vals = X_sep_impl->dense.vals.data();
+  for (perflibs_int_t i = 0; i < sep_dim * nrhs; ++i) {
+    x_sep_vals[i] *= alpha;
+  }
+  for (const auto &sep_contrib : sep_contribs) {
+    auto sep_contrib_impl =
+        reinterpret_cast<perflibs_spmat_impl_t<T> *>(sep_contrib->impl);
+    const T *contrib_vals = sep_contrib_impl->dense.vals_ptr;
+    for (perflibs_int_t i = 0; i < sep_dim * nrhs; ++i) {
+      x_sep_vals[i] -= contrib_vals[i];
+    }
+  }
+
+  [[maybe_unused]] auto stat =
+      spsm_exec<T>(PERFLIBS_SPARSE_OPERATION_NOTRANS,
+                   supernodal.separator.get(), X_sep.get(), T(1), X_sep.get());
+  assert(stat == PERFLIBS_STATUS_SUCCESS);
+
+  perflibs::sparse::pod_vector<T> x_work;
+  T *x_work_ptr = X;
+  if (!x_is_row_major) {
+    x_work.resize(n * nrhs);
+    x_work_ptr = x_work.data();
+  }
+
+  copy_row_major_dense_matrix_values<T>(X_sep.get(), x_work_ptr,
+                                        sep_dim * nrhs);
+  for (size_t i = 0; i < X_blocks.size(); ++i) {
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    copy_row_major_dense_matrix_values<T>(
+        X_blocks[i].get(), x_work_ptr + offsets[i] * nrhs, diag_impl->m * nrhs);
+  }
+
+  if (!x_is_row_major) {
+    copy_row_major_to_strided_dense(X, x_work.data(), n, nrhs, x_stride_row,
+                                    x_stride_col);
+  }
+}
+
+template <typename T>
+void spsm_supernodal_parallel_ut_trans(perflibs_supernodal<T> &supernodal,
+                                       perflibs_sparse_hint_value trans, T *X,
+                                       perflibs_int_t x_stride_row,
+                                       perflibs_int_t x_stride_col, T alpha,
+                                       const T *Y, perflibs_int_t y_stride_row,
+                                       perflibs_int_t y_stride_col,
+                                       perflibs_int_t nrhs) {
+  const perflibs_int_t n = supernodal.n;
+  auto impl_sep =
+      reinterpret_cast<perflibs_spmat_impl_t<T> *>(supernodal.separator->impl);
+  const perflibs_int_t sep_dim = impl_sep->m;
+
+  const bool x_is_row_major = x_stride_row == nrhs && x_stride_col == 1;
+  const bool y_is_row_major = y_stride_row == nrhs && y_stride_col == 1;
+
+  perflibs::sparse::pod_vector<T> y_work;
+  const T *y_work_ptr = Y;
+  if (!y_is_row_major) {
+    y_work.resize(n * nrhs);
+    copy_strided_dense_to_row_major(y_work.data(), Y, n, nrhs, y_stride_row,
+                                    y_stride_col);
+    y_work_ptr = y_work.data();
+  }
+
+  std::vector<size_t> offsets(supernodal.mats_diag.size());
+  if (!offsets.empty()) {
+    offsets[0] = sep_dim;
+  }
+  for (size_t i = 1; i < offsets.size(); ++i) {
+    offsets[i] = offsets[i - 1] + reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+                                      supernodal.mats_diag[i - 1]->impl)
+                                      ->m;
+  }
+
+  auto X_sep = make_row_major_dense_matrix<T>(sep_dim, nrhs, y_work_ptr, 0);
+  auto Y_sep = make_row_major_dense_matrix<T>(sep_dim, nrhs, y_work_ptr,
+                                              PERFLIBS_SPARSE_CREATE_NOCOPY);
+  [[maybe_unused]] auto stat = spsm_exec<T>(trans, supernodal.separator.get(),
+                                            X_sep.get(), alpha, Y_sep.get());
+  assert(stat == PERFLIBS_STATUS_SUCCESS);
+
+  std::vector<std::unique_ptr<perflibs_spmat_top_t>> X_blocks(
+      supernodal.mats_diag.size());
+
+#pragma omp parallel for
+  for (size_t i = 0; i < supernodal.mats_diag.size(); ++i) {
+    const auto off = offsets[i];
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    const auto block_rows = diag_impl->m;
+
+    // X_block starts as alpha * Y so the off-diagonal update is not scaled
+    // again by the subsequent diagonal solve.
+    auto X_block = make_row_major_dense_matrix<T>(block_rows, nrhs,
+                                                  y_work_ptr + off * nrhs, 0);
+    auto X_block_impl =
+        reinterpret_cast<perflibs_spmat_impl_t<T> *>(X_block->impl);
+    for (perflibs_int_t j = 0; j < block_rows * nrhs; ++j) {
+      X_block_impl->dense.vals[j] *= alpha;
+    }
+    [[maybe_unused]] auto spmm_stat = spmm_exec<T>(
+        trans, PERFLIBS_SPARSE_OPERATION_NOTRANS, T(-1),
+        supernodal.mats_sep[i].get(), X_sep.get(), T(1), X_block.get());
+    assert(spmm_stat == PERFLIBS_STATUS_SUCCESS);
+
+    [[maybe_unused]] auto spsm_stat =
+        spsm_exec<T>(trans, supernodal.mats_diag[i].get(), X_block.get(), T(1),
+                     X_block.get());
+    assert(spsm_stat == PERFLIBS_STATUS_SUCCESS);
+
+    X_blocks[i] = std::move(X_block);
+  }
+
+  perflibs::sparse::pod_vector<T> x_work;
+  T *x_work_ptr = X;
+  if (!x_is_row_major) {
+    x_work.resize(n * nrhs);
+    x_work_ptr = x_work.data();
+  }
+
+  copy_row_major_dense_matrix_values<T>(X_sep.get(), x_work_ptr,
+                                        sep_dim * nrhs);
+  for (size_t i = 0; i < X_blocks.size(); ++i) {
+    auto diag_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+        supernodal.mats_diag[i]->impl);
+    copy_row_major_dense_matrix_values<T>(
+        X_blocks[i].get(), x_work_ptr + offsets[i] * nrhs, diag_impl->m * nrhs);
+  }
+
+  if (!x_is_row_major) {
+    copy_row_major_to_strided_dense(X, x_work.data(), n, nrhs, x_stride_row,
+                                    x_stride_col);
+  }
+}
+
+template <typename T>
 void spsv_supernodal(perflibs_supernodal<T> &supernodal,
                      perflibs_sparse_hint_value trans, T *x, const T *y,
                      T alpha) {
@@ -1256,6 +2099,100 @@ void spsv_supernodal(perflibs_supernodal<T> &supernodal,
   }
 }
 
+template <typename T>
+void spsm_supernodal(perflibs_supernodal<T> &supernodal,
+                     perflibs_sparse_hint_value trans, T *X,
+                     perflibs_int_t x_stride_row, perflibs_int_t x_stride_col,
+                     T alpha, const T *Y, perflibs_int_t y_stride_row,
+                     perflibs_int_t y_stride_col, perflibs_int_t nrhs) {
+  if (nrhs <= 0) {
+    return;
+  }
+
+  assert(supernodal.mats_diag.size() == supernodal.mats_sep.size());
+
+  if (supernodal.m != 0 && supernodal.n != 0 &&
+      (supernodal.shape == PERFLIBS_SPARSE_SHAPE_LOWER_TRIANGULAR ||
+       supernodal.shape == PERFLIBS_SPARSE_SHAPE_UPPER_TRIANGULAR)) {
+    if (perflibs::sparse::omp::get_max_threads() > 1) {
+      if (supernodal.shape == PERFLIBS_SPARSE_SHAPE_LOWER_TRIANGULAR) {
+        if (trans == PERFLIBS_SPARSE_OPERATION_NOTRANS) {
+          spsm_supernodal_parallel_lt_notrans<T>(
+              supernodal, X, x_stride_row, x_stride_col, alpha, Y, y_stride_row,
+              y_stride_col, nrhs);
+        } else {
+          spsm_supernodal_parallel_lt_trans<T>(
+              supernodal, trans, X, x_stride_row, x_stride_col, alpha, Y,
+              y_stride_row, y_stride_col, nrhs);
+        }
+      } else {
+        if (trans == PERFLIBS_SPARSE_OPERATION_NOTRANS) {
+          spsm_supernodal_parallel_ut_notrans<T>(
+              supernodal, X, x_stride_row, x_stride_col, alpha, Y, y_stride_row,
+              y_stride_col, nrhs);
+        } else {
+          spsm_supernodal_parallel_ut_trans<T>(
+              supernodal, trans, X, x_stride_row, x_stride_col, alpha, Y,
+              y_stride_row, y_stride_col, nrhs);
+        }
+      }
+    } else {
+      if (supernodal.shape == PERFLIBS_SPARSE_SHAPE_LOWER_TRIANGULAR) {
+        if (trans == PERFLIBS_SPARSE_OPERATION_NOTRANS) {
+          spsm_supernodal_serial_lt_notrans<T>(
+              supernodal, X, x_stride_row, x_stride_col, alpha, Y, y_stride_row,
+              y_stride_col, nrhs);
+        } else {
+          spsm_supernodal_serial_lt_trans<T>(supernodal, trans, X, x_stride_row,
+                                             x_stride_col, alpha, Y,
+                                             y_stride_row, y_stride_col, nrhs);
+        }
+      } else {
+        if (trans == PERFLIBS_SPARSE_OPERATION_NOTRANS) {
+          spsm_supernodal_serial_ut_notrans<T>(
+              supernodal, X, x_stride_row, x_stride_col, alpha, Y, y_stride_row,
+              y_stride_col, nrhs);
+        } else {
+          spsm_supernodal_serial_ut_trans<T>(supernodal, trans, X, x_stride_row,
+                                             x_stride_col, alpha, Y,
+                                             y_stride_row, y_stride_col, nrhs);
+        }
+      }
+    }
+    return;
+  }
+
+  const bool unit_row_strides = x_stride_row == 1 && y_stride_row == 1;
+  perflibs::sparse::pod_vector<T> xbuf(unit_row_strides ? 0 : supernodal.n);
+  perflibs::sparse::pod_vector<T> ybuf(unit_row_strides ? 0 : supernodal.n);
+
+  for (perflibs_int_t col = 0; col < nrhs; ++col) {
+    T *x_col = X + col * x_stride_col;
+    const T *y_col = Y + col * y_stride_col;
+
+    // The initial implementation delegates each RHS column to the existing
+    // vector solve. If the column is already contiguous, pass it through
+    // directly so the behaviour is exactly the same as spsv_supernodal().
+    if (unit_row_strides) {
+      spsv_supernodal<T>(supernodal, trans, x_col, y_col, alpha);
+      continue;
+    }
+
+    // Otherwise gather the strided dense RHS column into contiguous storage,
+    // solve it, then scatter the contiguous result back to the caller's dense
+    // output layout.
+    for (perflibs_int_t row = 0; row < supernodal.n; ++row) {
+      ybuf[row] = y_col[row * y_stride_row];
+    }
+
+    spsv_supernodal<T>(supernodal, trans, xbuf.data(), ybuf.data(), alpha);
+
+    for (perflibs_int_t row = 0; row < supernodal.n; ++row) {
+      x_col[row * x_stride_row] = xbuf[row];
+    }
+  }
+}
+
 template void spsv_supernodal<float>(perflibs_supernodal<float> &supernodal,
                                      perflibs_sparse_hint_value trans, float *x,
                                      const float *y, float alpha);
@@ -1270,5 +2207,30 @@ template void spsv_supernodal<std::complex<double>>(
     perflibs_supernodal<std::complex<double>> &supernodal,
     perflibs_sparse_hint_value trans, std::complex<double> *x,
     const std::complex<double> *y, std::complex<double> alpha);
+template void
+spsm_supernodal<float>(perflibs_supernodal<float> &supernodal,
+                       perflibs_sparse_hint_value trans, float *X,
+                       perflibs_int_t x_stride_row, perflibs_int_t x_stride_col,
+                       float alpha, const float *Y, perflibs_int_t y_stride_row,
+                       perflibs_int_t y_stride_col, perflibs_int_t nrhs);
+template void spsm_supernodal<double>(
+    perflibs_supernodal<double> &supernodal, perflibs_sparse_hint_value trans,
+    double *X, perflibs_int_t x_stride_row, perflibs_int_t x_stride_col,
+    double alpha, const double *Y, perflibs_int_t y_stride_row,
+    perflibs_int_t y_stride_col, perflibs_int_t nrhs);
+template void spsm_supernodal<std::complex<float>>(
+    perflibs_supernodal<std::complex<float>> &supernodal,
+    perflibs_sparse_hint_value trans, std::complex<float> *X,
+    perflibs_int_t x_stride_row, perflibs_int_t x_stride_col,
+    std::complex<float> alpha, const std::complex<float> *Y,
+    perflibs_int_t y_stride_row, perflibs_int_t y_stride_col,
+    perflibs_int_t nrhs);
+template void spsm_supernodal<std::complex<double>>(
+    perflibs_supernodal<std::complex<double>> &supernodal,
+    perflibs_sparse_hint_value trans, std::complex<double> *X,
+    perflibs_int_t x_stride_row, perflibs_int_t x_stride_col,
+    std::complex<double> alpha, const std::complex<double> *Y,
+    perflibs_int_t y_stride_row, perflibs_int_t y_stride_col,
+    perflibs_int_t nrhs);
 
 } // namespace perflibs::sparse

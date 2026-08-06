@@ -127,6 +127,38 @@ static int test_spmm_transpose_dense_sparse() {
   CHECK_DOUBLE_ARRAY(dense_result, expected, m * n, 1e-12);
   free(dense_result);
   perflibs_spmat_destroy(c_dense);
+
+  double denseB_col[16];
+  double c_init_col[16];
+  for (perflibs_int_t row = 0; row < 4; ++row) {
+    for (perflibs_int_t col = 0; col < 4; ++col) {
+      denseB_col[col * 4 + row] = denseB[row * 4 + col];
+      c_init_col[col * 4 + row] = c_init[row * 4 + col];
+    }
+  }
+  perflibs_spmat_t B_col = NULL;
+  perflibs_spmat_t C_col = NULL;
+  CHECK_STATUS(perflibs_spmat_create_dense_d(&B_col, PERFLIBS_COL_MAJOR, 4, 4,
+                                             4, denseB_col, 0));
+  CHECK_STATUS(perflibs_spmat_create_dense_d(&C_col, PERFLIBS_COL_MAJOR, 4, 4,
+                                             4, c_init_col, 0));
+  CHECK_STATUS(perflibs_spmm_optimize(
+      PERFLIBS_SPARSE_OPERATION_NOTRANS, PERFLIBS_SPARSE_OPERATION_NOTRANS,
+      PERFLIBS_SPARSE_SCALAR_ANY, A, B_col, PERFLIBS_SPARSE_SCALAR_ANY, C_col));
+  CHECK_STATUS(perflibs_spmm_exec_d(PERFLIBS_SPARSE_OPERATION_NOTRANS,
+                                    PERFLIBS_SPARSE_OPERATION_NOTRANS,
+                                    alpha_beta, A, B_col, beta, C_col));
+  dense_result = NULL;
+  CHECK_STATUS(perflibs_spmat_export_dense_d(C_col, PERFLIBS_ROW_MAJOR, &m, &n,
+                                             &dense_result));
+  compute_expected_mm(PERFLIBS_SPARSE_OPERATION_NOTRANS,
+                      PERFLIBS_SPARSE_OPERATION_NOTRANS, alpha_beta, beta,
+                      denseA, 4, 4, denseB, 4, 4, c_init, expected);
+  CHECK_DOUBLE_ARRAY(dense_result, expected, m * n, 1e-12);
+  free(dense_result);
+  perflibs_spmat_destroy(C_col);
+  perflibs_spmat_destroy(B_col);
+
   perflibs_spmat_destroy(A);
   perflibs_spmat_destroy(B);
 

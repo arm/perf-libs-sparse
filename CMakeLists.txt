@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
 
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.24)
 
 project(perflibs_sparse
   VERSION 26.04.0
@@ -704,6 +704,8 @@ if(SPARSE_ENABLE_TESTS)
     "${CMAKE_CURRENT_SOURCE_DIR}/test/strategy_paths_d.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/spvec_ops.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/super_lower.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/super_spsm_lower.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/super_spsm_upper.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/super_upper.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/vector_type_smoke.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/spsm_basic_c.c"

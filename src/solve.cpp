@@ -11,8 +11,10 @@
 #include "compressed_sparse_rows.hpp"
 #include "convert.hpp"
 #include "dense.hpp"
+#include "matmul.hpp"
 #include "matrix_state.hpp"
 #include "matvec.hpp"
+#include "object_helpers.hpp"
 #include "pod_vector.hpp"
 #include "supernodal.hpp"
 #include "timer.hpp"
@@ -21,10 +23,81 @@
 #include "cblas_wrappers.hpp"
 #include "statistics.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <inttypes.h>
+#include <memory>
+#include <vector>
 
 namespace perflibs::sparse {
+
+// Parallelize sufficiently large SpSM calls over groups of right-hand sides.
+// Keep every group at least this large so that each call retains useful SpSM
+// work and does not introduce excessive per-call overhead.
+constexpr perflibs_int_t spsm_rhs_parallel_min_chunk_size = 2;
+
+// Keep chunks within the range handled by the NRHS-templated SpSM kernels.
+constexpr perflibs_int_t spsm_rhs_parallel_max_chunk_size = 8;
+
+// Retain enough threads in each chunk for useful parallelism over supernodal
+// parts or CSR levels.
+constexpr int spsm_sparse_parallel_min_threads = 4;
+
+static perflibs_int_t largest_divisor_not_greater_than(perflibs_int_t value,
+                                                       perflibs_int_t limit) {
+  for (auto divisor = limit; divisor > 1; --divisor) {
+    if (value % divisor == 0) {
+      return divisor;
+    }
+  }
+  return 1;
+}
+
+// COO and SCS use the generic multi-RHS SpSM kernel after conversion.
+static bool supports_generic_spsm_kernel(spmat_format_t format) {
+  return format == perflibs_format_csr || format == perflibs_format_csc ||
+         format == perflibs_format_coo || format == perflibs_format_scs;
+}
+
+template <typename T>
+static perflibs_status_t
+prepare_spsm_chunk_formats(perflibs_sparse_hint_value trans,
+                           perflibs_spmat_impl_t<T> *impl) {
+  const auto format = trans == PERFLIBS_SPARSE_OPERATION_NOTRANS
+                          ? perflibs_format_csr
+                          : perflibs_format_csc;
+  if (impl->spmat_format != perflibs_format_supernodal) {
+    return supports_generic_spsm_kernel(impl->spmat_format)
+               ? convert(format, impl)
+               : PERFLIBS_STATUS_SUCCESS;
+  }
+
+  auto prepare = [format](perflibs_spmat_top_t *mat) {
+    if (mat == nullptr) {
+      return PERFLIBS_STATUS_SUCCESS;
+    }
+    auto mat_impl = reinterpret_cast<perflibs_spmat_impl_t<T> *>(mat->impl);
+    return supports_generic_spsm_kernel(mat_impl->spmat_format)
+               ? convert(format, mat_impl)
+               : PERFLIBS_STATUS_SUCCESS;
+  };
+
+  // A normal supernodal execution may convert each block on first use. Do all
+  // such conversions before concurrent RHS chunks start using the same block.
+  for (const auto &mat : impl->supernodal.mats_diag) {
+    const auto status = prepare(mat.get());
+    if (status != PERFLIBS_STATUS_SUCCESS) {
+      return status;
+    }
+  }
+  for (const auto &mat : impl->supernodal.mats_sep) {
+    const auto status = prepare(mat.get());
+    if (status != PERFLIBS_STATUS_SUCCESS) {
+      return status;
+    }
+  }
+  return prepare(impl->supernodal.separator.get());
+}
 
 template <typename T>
 perflibs_status_t call_spsv(perflibs_sparse_hint_value trans,
@@ -138,28 +211,52 @@ call_spsm(perflibs_sparse_hint_value trans, perflibs_spmat_impl_t<T> *impl,
                               Y, y_stride_row, y_stride_col, nrhs);
   }
 
-  auto i_trans = (sparse_hint_value_internal)trans;
+  if (impl->spmat_format == perflibs_format_supernodal) {
+    spsm_supernodal<T>(impl->supernodal, trans, X, x_stride_row, x_stride_col,
+                       alpha, Y, y_stride_row, y_stride_col, nrhs);
+    return PERFLIBS_STATUS_SUCCESS;
+  }
+
   auto i_uplo = (sparse_hint_value_internal)impl->shape;
   auto i_diag = (sparse_hint_value_internal)impl->diag;
 
-  if (impl->spmat_format == perflibs_format_coo ||
-      impl->spmat_format == perflibs_format_scs) {
-    convert(perflibs_format_csr, impl);
-  }
-
-  if (impl->spmat_format == perflibs_format_csr &&
-      trans == PERFLIBS_SPARSE_OPERATION_NOTRANS) {
-    spsm_csr<T>(impl->csr, i_trans, i_uplo, i_diag, X, x_stride_row,
-                x_stride_col, Y, y_stride_row, y_stride_col, nrhs, alpha);
-  } else if (impl->spmat_format == perflibs_format_csc &&
-             (trans == PERFLIBS_SPARSE_OPERATION_TRANS ||
-              trans == PERFLIBS_SPARSE_OPERATION_CONJTRANS)) {
-    spsm_csc<T>(impl->csc, i_trans, i_uplo, i_diag, X, x_stride_row,
-                x_stride_col, Y, y_stride_row, y_stride_col, nrhs, alpha);
-  } else {
+  if (!supports_generic_spsm_kernel(impl->spmat_format)) {
     return call_spsm_fallback<T>(trans, impl, X, x_stride_row, x_stride_col,
                                  alpha, Y, y_stride_row, y_stride_col, nrhs);
   }
+
+  auto flip_uplo = [](sparse_hint_value_internal uplo) {
+    if (uplo == PERFLIBS_SHAPE_UPPER_TRIANGULAR) {
+      return PERFLIBS_SHAPE_LOWER_TRIANGULAR;
+    }
+    if (uplo == PERFLIBS_SHAPE_LOWER_TRIANGULAR) {
+      return PERFLIBS_SHAPE_UPPER_TRIANGULAR;
+    }
+    return uplo;
+  };
+
+  perflibs_csr<T> csr_view{};
+  auto csr_trans = PERFLIBS_OPERATION_NOTRANS;
+  auto csr_uplo = i_uplo;
+
+  if (trans == PERFLIBS_SPARSE_OPERATION_NOTRANS) {
+    convert(perflibs_format_csr, impl);
+    csr_view = perflibs_csr<T>(impl->m, impl->n, impl->csr.vals_ptr,
+                               impl->csr.row_ptr_ptr, impl->csr.col_indx_ptr,
+                               impl->csr.par_sv);
+  } else {
+    convert(perflibs_format_csc, impl);
+    csr_view = perflibs_csr<T>(impl->n, impl->m, impl->csc.vals_ptr,
+                               impl->csc.col_ptr_ptr, impl->csc.row_indx_ptr,
+                               impl->csc.par_sv);
+    csr_uplo = flip_uplo(i_uplo);
+    if (trans == PERFLIBS_SPARSE_OPERATION_CONJTRANS) {
+      csr_trans = PERFLIBS_OPERATION_CONJNOTRANS;
+    }
+  }
+
+  spsm_csr<T>(csr_view, csr_trans, csr_uplo, i_diag, X, x_stride_row,
+              x_stride_col, Y, y_stride_row, y_stride_col, nrhs, alpha);
 
   return PERFLIBS_STATUS_SUCCESS;
 };
@@ -378,11 +475,111 @@ perflibs_status_t spsm_exec_impl(perflibs_sparse_hint_value trans,
   }
 
   const auto nrhs = impl_X->n;
-  const auto [x_stride_row, x_stride_col] = dense_strides(impl_X->dense);
-  const auto [y_stride_row, y_stride_col] = dense_strides(impl_Y->dense);
-  return call_spsm<T>(trans, impl_A, impl_X->dense.vals.data(), x_stride_row,
-                      x_stride_col, alpha, impl_Y->dense.vals_ptr, y_stride_row,
-                      y_stride_col, nrhs);
+  // Clang cannot capture variables introduced by structured bindings in an
+  // OpenMP region, so extract the strides into ordinary local variables.
+  const auto x_strides = dense_strides(impl_X->dense);
+  const auto x_stride_row = x_strides.first;
+  const auto x_stride_col = x_strides.second;
+  const auto y_strides = dense_strides(impl_Y->dense);
+  const auto y_stride_row = y_strides.first;
+  const auto y_stride_col = y_strides.second;
+  T *x_vals = impl_X->dense.vals.data();
+  const T *y_vals = impl_Y->dense.vals_ptr;
+
+  const auto available_threads = perflibs::sparse::omp::get_max_threads();
+
+  perflibs_int_t nchunks = 1;
+  perflibs_int_t outer_threads = 1;
+  int inner_threads = 1;
+  bool enable_nested_parallelism = false;
+  if (available_threads > 1 && nrhs >= 2 * spsm_rhs_parallel_min_chunk_size) {
+    // Force every chunk into the range handled by the NRHS-templated kernels.
+    // Prefer to retain useful sparse parallelism within each chunk. If that
+    // cannot satisfy the maximum chunk size, spend more of the thread budget
+    // on RHS parallelism, down to one inner thread if necessary.
+    const auto min_chunks = std::max<perflibs_int_t>(
+        2, (nrhs + spsm_rhs_parallel_max_chunk_size - 1) /
+               spsm_rhs_parallel_max_chunk_size);
+    const auto max_chunks = nrhs / spsm_rhs_parallel_min_chunk_size;
+    const auto preferred_max_chunks = std::min<perflibs_int_t>(
+        max_chunks, available_threads / spsm_sparse_parallel_min_threads);
+    nchunks = largest_divisor_not_greater_than(available_threads,
+                                               preferred_max_chunks);
+
+    if (nchunks < min_chunks) {
+      const auto max_outer_threads =
+          std::min<perflibs_int_t>(max_chunks, available_threads);
+      nchunks = largest_divisor_not_greater_than(available_threads,
+                                                 max_outer_threads);
+    }
+    if (nchunks < min_chunks) {
+      // There are more chunks than threads, so execute them in waves.
+      nchunks = min_chunks;
+    }
+
+    outer_threads = std::min<perflibs_int_t>(nchunks, available_threads);
+    if (outer_threads > 1) {
+      inner_threads = available_threads / outer_threads;
+      enable_nested_parallelism = true;
+    }
+  }
+
+  if (nchunks <= 1) {
+    return call_spsm<T>(trans, impl_A, x_vals, x_stride_row, x_stride_col,
+                        alpha, y_vals, y_stride_row, y_stride_col, nrhs);
+  }
+
+  // Perform first-use format conversions before the chunks execute
+  // concurrently against the same sparse matrix and supernodal submatrices.
+  if (alpha != T(0)) {
+    ret = prepare_spsm_chunk_formats(trans, impl_A);
+    if (ret != PERFLIBS_STATUS_SUCCESS) {
+      return ret;
+    }
+  }
+
+  const auto chunk_size = nrhs / nchunks;
+  const auto remainder = nrhs % nchunks;
+  std::vector<perflibs_status_t> statuses(nchunks, PERFLIBS_STATUS_SUCCESS);
+
+  // Nested execution adds an outer region over RHS chunks and an inner region
+  // inside each SpSM solve, using level-set or supernodal parallelism. Make
+  // room for both relative to the active level on entry. We will reset
+  // the max active levels before returning to leave the setup unchanged
+  // for the caller.
+  const auto previous_max_active_levels =
+      perflibs::sparse::omp::get_max_active_levels();
+  const auto required_max_active_levels =
+      perflibs::sparse::omp::get_active_level() + 2;
+  const bool increase_max_active_levels =
+      enable_nested_parallelism &&
+      previous_max_active_levels < required_max_active_levels;
+  if (increase_max_active_levels) {
+    perflibs::sparse::omp::set_max_active_levels(required_max_active_levels);
+  }
+#pragma omp parallel for schedule(static) num_threads(outer_threads)
+  for (perflibs_int_t chunk = 0; chunk < nchunks; ++chunk) {
+    if (enable_nested_parallelism) {
+      perflibs::sparse::omp::set_num_threads(inner_threads);
+    }
+    const auto first_col =
+        chunk * chunk_size + std::min<perflibs_int_t>(chunk, remainder);
+    const auto chunk_nrhs = chunk_size + (chunk < remainder ? 1 : 0);
+    statuses[chunk] = call_spsm<T>(
+        trans, impl_A, x_vals + first_col * x_stride_col, x_stride_row,
+        x_stride_col, alpha, y_vals + first_col * y_stride_col, y_stride_row,
+        y_stride_col, chunk_nrhs);
+  }
+  if (increase_max_active_levels) {
+    perflibs::sparse::omp::set_max_active_levels(previous_max_active_levels);
+  }
+
+  for (const auto status : statuses) {
+    if (status != PERFLIBS_STATUS_SUCCESS) {
+      return status;
+    }
+  }
+  return PERFLIBS_STATUS_SUCCESS;
 }
 
 template <typename T>
@@ -428,6 +625,7 @@ template perflibs_status_t spsm_exec<std::complex<double>>(
     perflibs_sparse_hint_value trans, perflibs_spmat_top_t *A,
     perflibs_spmat_top_t *X, std::complex<double> alpha,
     perflibs_spmat_top_t *Y);
+
 /**
  * This function successively times spsv_exec using half the value of
  * impl->cs?.par_sv.nthreads, stopping when it is no longer faster to use fewer
@@ -866,5 +1064,128 @@ template perflibs_status_t spsv_optimize<std::complex<float>>(
     perflibs_spmat_impl_t<std::complex<float>> *impl);
 template perflibs_status_t spsv_optimize<std::complex<double>>(
     perflibs_spmat_impl_t<std::complex<double>> *impl);
+
+template <typename T>
+perflibs_status_t
+spsm_optimize(perflibs_sparse_hint_value trans, perflibs_spmat_top_t *A,
+              perflibs_spmat_top_t *X, perflibs_spmat_top_t *Y) {
+  auto impl_A = reinterpret_cast<perflibs_spmat_impl_t<T> *>(A->impl);
+
+  if (impl_A->spmat_format != perflibs_format_supernodal ||
+      impl_A->userhint_spsv_invocations != PERFLIBS_SPARSE_INVOCATIONS_MANY ||
+      impl_A->no_copy) {
+    return spsv_optimize<T>(impl_A);
+  }
+
+  if (impl_A->shape == PERFLIBS_SPARSE_SHAPE_RECTANGULAR ||
+      impl_A->diag == PERFLIBS_SPARSE_DIAG_ZERO) {
+    impl_A->error_handle.perflibs_error_type =
+        PERFLIBS_STATUS_INPUT_PARAMETER_ERROR;
+    impl_A->error_handle.perflibs_error_code = 1;
+    impl_A->error_handle.err_msg =
+        impl_A->shape == PERFLIBS_SPARSE_SHAPE_RECTANGULAR
+            ? "The matrix passed to perflibs_spsm_optimize is not triangular. "
+              "The matrix used to perform a triangular solve must be either "
+              "upper or lower triangular."
+            : "The matrix passed to perflibs_spsm_optimize contains at least "
+              "one zero on the diagonal.";
+    return PERFLIBS_STATUS_INPUT_PARAMETER_ERROR;
+  }
+
+  auto impl_X = reinterpret_cast<perflibs_spmat_impl_t<T> *>(X->impl);
+  auto impl_Y = reinterpret_cast<perflibs_spmat_impl_t<T> *>(Y->impl);
+  if (impl_A->m != impl_A->n || impl_X->m != impl_Y->m ||
+      impl_X->n != impl_Y->n || impl_A->m != impl_X->m ||
+      impl_A->m != impl_Y->m) {
+    impl_A->error_handle.perflibs_error_type =
+        PERFLIBS_STATUS_INPUT_PARAMETER_ERROR;
+    impl_A->error_handle.perflibs_error_code = 1;
+    impl_A->error_handle.err_msg =
+        "Matrix dimensions passed to perflibs_spsm_optimize are incompatible.";
+    return PERFLIBS_STATUS_INPUT_PARAMETER_ERROR;
+  }
+
+  if (impl_X->n == 1) {
+    return spsv_optimize<T>(impl_A);
+  }
+
+  int pinfo = 0;
+#pragma omp parallel for reduction(+ : pinfo)
+  for (auto &mat : impl_A->supernodal.mats_diag) {
+    auto diag = reinterpret_cast<perflibs_spmat_impl_t<T> *>(mat->impl);
+    pinfo += (int)spsv_optimize<T>(diag);
+  }
+
+  if ((perflibs_status_t)pinfo != PERFLIBS_STATUS_SUCCESS) {
+    return PERFLIBS_STATUS_EXECUTION_FAILURE;
+  }
+
+  pinfo = 0;
+  const bool notrans = trans == PERFLIBS_SPARSE_OPERATION_NOTRANS;
+  const bool parallel = perflibs::sparse::omp::get_max_threads() > 1;
+  const auto spmm_alpha = notrans && parallel ? PERFLIBS_SPARSE_SCALAR_ONE
+                                              : PERFLIBS_SPARSE_SCALAR_ANY;
+#pragma omp parallel for reduction(+ : pinfo)
+  for (auto &mat : impl_A->supernodal.mats_sep) {
+    auto sep_blk = reinterpret_cast<perflibs_spmat_impl_t<T> *>(mat->impl);
+    const auto b_rows = notrans ? sep_blk->n : sep_blk->m;
+    const auto c_rows = notrans ? sep_blk->m : sep_blk->n;
+    const auto nrhs = impl_X->n;
+
+    if (b_rows == 0 || c_rows == 0 || nrhs == 0) {
+      continue;
+    }
+
+    std::vector<T> B_vals(b_rows * nrhs);
+    std::vector<T> C_vals(c_rows * nrhs);
+    perflibs_spmat_top_t *B = nullptr;
+    perflibs_spmat_top_t *C = nullptr;
+
+    auto info = create_spmat_top_dense<T>(&B, PERFLIBS_ROW_MAJOR, b_rows, nrhs,
+                                          nrhs, 0, B_vals.data(), 0);
+    std::unique_ptr<perflibs_spmat_top_t> B_owner(B);
+    if (info != PERFLIBS_STATUS_SUCCESS) {
+      pinfo += (int)info;
+      continue;
+    }
+
+    info = create_spmat_top_dense<T>(&C, PERFLIBS_ROW_MAJOR, c_rows, nrhs, nrhs,
+                                     0, C_vals.data(), 0);
+    std::unique_ptr<perflibs_spmat_top_t> C_owner(C);
+    if (info != PERFLIBS_STATUS_SUCCESS) {
+      pinfo += (int)info;
+      continue;
+    }
+
+    pinfo += (int)spmm_optimize<T>(trans, PERFLIBS_SPARSE_OPERATION_NOTRANS,
+                                   spmm_alpha, mat.get(), B,
+                                   PERFLIBS_SPARSE_SCALAR_ONE, C);
+  }
+
+  if ((perflibs_status_t)pinfo != PERFLIBS_STATUS_SUCCESS) {
+    return PERFLIBS_STATUS_EXECUTION_FAILURE;
+  }
+
+  auto sep = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
+      impl_A->supernodal.separator->impl);
+  auto info = spsv_optimize<T>(sep);
+  if (info != PERFLIBS_STATUS_SUCCESS) {
+    return info;
+  }
+
+  return PERFLIBS_STATUS_SUCCESS;
+}
+template perflibs_status_t
+spsm_optimize<float>(perflibs_sparse_hint_value trans, perflibs_spmat_top_t *A,
+                     perflibs_spmat_top_t *X, perflibs_spmat_top_t *Y);
+template perflibs_status_t
+spsm_optimize<double>(perflibs_sparse_hint_value trans, perflibs_spmat_top_t *A,
+                      perflibs_spmat_top_t *X, perflibs_spmat_top_t *Y);
+template perflibs_status_t spsm_optimize<std::complex<float>>(
+    perflibs_sparse_hint_value trans, perflibs_spmat_top_t *A,
+    perflibs_spmat_top_t *X, perflibs_spmat_top_t *Y);
+template perflibs_status_t spsm_optimize<std::complex<double>>(
+    perflibs_sparse_hint_value trans, perflibs_spmat_top_t *A,
+    perflibs_spmat_top_t *X, perflibs_spmat_top_t *Y);
 
 } // namespace perflibs::sparse

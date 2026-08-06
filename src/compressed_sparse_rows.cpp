@@ -1973,6 +1973,122 @@ inline __attribute__((always_inline)) void spsm_notrans_kernel(
   }
 };
 
+// SpSM computation to update row i for small, fixed row-major RHS counts.
+template <perflibs_int_t NRHS, bool IsConj, typename T>
+inline __attribute__((always_inline)) void spsm_notrans_kernel_fixed_nrhs(
+    const bool unit, const perflibs_int_t diag_indx, const perflibs_int_t i,
+    const perflibs_int_t off, const perflibs_int_t *col_indx, const T *vals,
+    T *X, const perflibs_int_t x_stride_row, const T *Y,
+    const perflibs_int_t y_stride_row, const T alpha,
+    const perflibs_int_t row_start_indx, const perflibs_int_t row_end_indx) {
+  perflibs_int_t jdiag = diag_indx;
+  T *x_row = X + i * x_stride_row;
+  const T *y_row = Y + i * y_stride_row;
+  T x[NRHS];
+
+#pragma omp simd
+  for (perflibs_int_t r = 0; r < NRHS; ++r) {
+    if constexpr (IsConj) {
+      x[r] = perflibs::sparse::conj(alpha * y_row[r]);
+    } else {
+      x[r] = alpha * y_row[r];
+    }
+  }
+
+  if (diag_indx >= 0) {
+    for (perflibs_int_t j = row_start_indx; j <= row_end_indx; ++j) {
+      const perflibs_int_t idx = col_indx[j] - off;
+      const T a = vals[j];
+      const T *x_dep = X + idx * x_stride_row;
+#pragma omp simd
+      for (perflibs_int_t r = 0; r < NRHS; ++r) {
+        x[r] -= x_dep[r] * a;
+      }
+    }
+  } else {
+    jdiag = row_end_indx;
+    for (perflibs_int_t j = row_end_indx; j >= row_start_indx; --j) {
+      const perflibs_int_t idx = col_indx[j] - off;
+      if (idx != i) {
+        const T a = vals[j];
+        const T *x_dep = X + idx * x_stride_row;
+#pragma omp simd
+        for (perflibs_int_t r = 0; r < NRHS; ++r) {
+          x[r] -= x_dep[r] * a;
+        }
+      } else {
+        jdiag = j;
+      }
+    }
+  }
+
+  if (!unit) {
+    const T diagv = vals[jdiag];
+#pragma omp simd
+    for (perflibs_int_t r = 0; r < NRHS; ++r) {
+      x[r] /= diagv;
+    }
+  }
+
+#pragma omp simd
+  for (perflibs_int_t r = 0; r < NRHS; ++r) {
+    x_row[r] = x[r];
+  }
+};
+
+template <bool IsConj, typename T>
+inline __attribute__((always_inline)) void spsm_notrans_kernel_dispatch(
+    const bool unit, const perflibs_int_t diag_indx, const perflibs_int_t i,
+    const perflibs_int_t off, const perflibs_int_t *col_indx, const T *vals,
+    T *X, const perflibs_int_t x_stride_row, const perflibs_int_t x_stride_col,
+    const T *Y, const perflibs_int_t y_stride_row,
+    const perflibs_int_t y_stride_col, const perflibs_int_t nrhs, const T alpha,
+    const perflibs_int_t row_start_indx, const perflibs_int_t row_end_indx) {
+  if (x_stride_col == 1 && y_stride_col == 1) {
+    switch (nrhs) {
+    case 2:
+      spsm_notrans_kernel_fixed_nrhs<2, IsConj, T>(
+          unit, diag_indx, i, off, col_indx, vals, X, x_stride_row, Y,
+          y_stride_row, alpha, row_start_indx, row_end_indx);
+      return;
+    case 3:
+      spsm_notrans_kernel_fixed_nrhs<3, IsConj, T>(
+          unit, diag_indx, i, off, col_indx, vals, X, x_stride_row, Y,
+          y_stride_row, alpha, row_start_indx, row_end_indx);
+      return;
+    case 4:
+      spsm_notrans_kernel_fixed_nrhs<4, IsConj, T>(
+          unit, diag_indx, i, off, col_indx, vals, X, x_stride_row, Y,
+          y_stride_row, alpha, row_start_indx, row_end_indx);
+      return;
+    case 5:
+      spsm_notrans_kernel_fixed_nrhs<5, IsConj, T>(
+          unit, diag_indx, i, off, col_indx, vals, X, x_stride_row, Y,
+          y_stride_row, alpha, row_start_indx, row_end_indx);
+      return;
+    case 6:
+      spsm_notrans_kernel_fixed_nrhs<6, IsConj, T>(
+          unit, diag_indx, i, off, col_indx, vals, X, x_stride_row, Y,
+          y_stride_row, alpha, row_start_indx, row_end_indx);
+      return;
+    case 7:
+      spsm_notrans_kernel_fixed_nrhs<7, IsConj, T>(
+          unit, diag_indx, i, off, col_indx, vals, X, x_stride_row, Y,
+          y_stride_row, alpha, row_start_indx, row_end_indx);
+      return;
+    case 8:
+      spsm_notrans_kernel_fixed_nrhs<8, IsConj, T>(
+          unit, diag_indx, i, off, col_indx, vals, X, x_stride_row, Y,
+          y_stride_row, alpha, row_start_indx, row_end_indx);
+      return;
+    }
+  }
+
+  spsm_notrans_kernel<IsConj, T>(
+      unit, diag_indx, i, off, col_indx, vals, X, x_stride_row, x_stride_col, Y,
+      y_stride_row, y_stride_col, nrhs, alpha, row_start_indx, row_end_indx);
+}
+
 template <bool IsConj, typename T>
 void spsv_csr_parallel(sparse_hint_value_internal uplo,
                        sparse_hint_value_internal diag, perflibs_int_t nrows,
@@ -1982,7 +2098,9 @@ void spsv_csr_parallel(sparse_hint_value_internal uplo,
 
   const auto info = get_csr_triangular_solve_info(row_ptr, uplo, diag);
 
-#pragma omp parallel num_threads(par_sv.nthreads)
+  [[maybe_unused]] const auto nthreads =
+      std::min(par_sv.nthreads, perflibs::sparse::omp::get_max_threads());
+#pragma omp parallel num_threads(nthreads)
   {
     const int tid = perflibs::sparse::omp::get_thread_num();
 
@@ -2092,8 +2210,9 @@ void spsm_csr_parallel(sparse_hint_value_internal uplo,
                        T alpha) {
 
   const auto info = get_csr_triangular_solve_info(row_ptr, uplo, diag);
-
-#pragma omp parallel num_threads(par_sv.nthreads)
+  [[maybe_unused]] const auto nthreads =
+      std::min(par_sv.nthreads, perflibs::sparse::omp::get_max_threads());
+#pragma omp parallel num_threads(nthreads)
   {
     const int tid = perflibs::sparse::omp::get_thread_num();
 
@@ -2119,7 +2238,7 @@ void spsm_csr_parallel(sparse_hint_value_internal uplo,
                   row_ptr[k + 1] - 1 - info.off - info.diag_hi;
               const perflibs_int_t diag_indx =
                   info.known_diag ? row_start_indx - 1 : -1;
-              spsm_notrans_kernel<IsConj, T>(
+              spsm_notrans_kernel_dispatch<IsConj, T>(
                   info.unit, diag_indx, k, info.off, col_indx, vals, X,
                   x_stride_row, x_stride_col, Y, y_stride_row, y_stride_col,
                   nrhs, alpha, row_start_indx, row_end_indx);
@@ -2132,7 +2251,7 @@ void spsm_csr_parallel(sparse_hint_value_internal uplo,
                   row_ptr[k + 1] - 1 - info.off - info.diag_hi;
               const perflibs_int_t diag_indx =
                   info.known_diag ? row_end_indx + 1 : -1;
-              spsm_notrans_kernel<IsConj, T>(
+              spsm_notrans_kernel_dispatch<IsConj, T>(
                   info.unit, diag_indx, k, info.off, col_indx, vals, X,
                   x_stride_row, x_stride_col, Y, y_stride_row, y_stride_col,
                   nrhs, alpha, row_start_indx, row_end_indx);
@@ -2160,7 +2279,7 @@ void spsm_csr_parallel(sparse_hint_value_internal uplo,
                   row_ptr[k + 1] - 1 - info.off - info.diag_hi;
               const perflibs_int_t diag_indx =
                   info.known_diag ? row_start_indx - 1 : -1;
-              spsm_notrans_kernel<IsConj, T>(
+              spsm_notrans_kernel_dispatch<IsConj, T>(
                   info.unit, diag_indx, k, info.off, col_indx, vals, X,
                   x_stride_row, x_stride_col, Y, y_stride_row, y_stride_col,
                   nrhs, alpha, row_start_indx, row_end_indx);
@@ -2173,7 +2292,7 @@ void spsm_csr_parallel(sparse_hint_value_internal uplo,
                   row_ptr[k + 1] - 1 - info.off - info.diag_hi;
               const perflibs_int_t diag_indx =
                   info.known_diag ? row_end_indx + 1 : -1;
-              spsm_notrans_kernel<IsConj, T>(
+              spsm_notrans_kernel_dispatch<IsConj, T>(
                   info.unit, diag_indx, k, info.off, col_indx, vals, X,
                   x_stride_row, x_stride_col, Y, y_stride_row, y_stride_col,
                   nrhs, alpha, row_start_indx, row_end_indx);
@@ -2259,7 +2378,6 @@ void spsm_csr_vanilla_notrans(
   const auto vals = csr.vals_ptr;
   const auto info = get_csr_triangular_solve_info(row_ptr, uplo, diag);
   const auto nrows = csr.m;
-
   if (info.upper) {
     // UPPER TRIANGULAR
     for (perflibs_int_t i = nrows - 1; i >= 0; --i) {
@@ -2269,7 +2387,7 @@ void spsm_csr_vanilla_notrans(
           row_ptr[i + 1] - 1 - info.off - info.diag_hi;
       const perflibs_int_t diag_indx =
           info.known_diag ? row_start_indx - 1 : -1;
-      spsm_notrans_kernel<IsConj, T>(
+      spsm_notrans_kernel_dispatch<IsConj, T>(
           info.unit, diag_indx, i, info.off, col_indx, vals, X, x_stride_row,
           x_stride_col, Y, y_stride_row, y_stride_col, nrhs, alpha,
           row_start_indx, row_end_indx);
@@ -2282,7 +2400,7 @@ void spsm_csr_vanilla_notrans(
       const perflibs_int_t row_end_indx =
           row_ptr[i + 1] - 1 - info.off - info.diag_hi;
       const perflibs_int_t diag_indx = info.known_diag ? row_end_indx + 1 : -1;
-      spsm_notrans_kernel<IsConj, T>(
+      spsm_notrans_kernel_dispatch<IsConj, T>(
           info.unit, diag_indx, i, info.off, col_indx, vals, X, x_stride_row,
           x_stride_col, Y, y_stride_row, y_stride_col, nrhs, alpha,
           row_start_indx, row_end_indx);
@@ -2431,13 +2549,12 @@ void spsm_csr(const perflibs_csr<T> &csr, sparse_hint_value_internal trans,
               T *X, perflibs_int_t x_stride_row, perflibs_int_t x_stride_col,
               const T *Y, perflibs_int_t y_stride_row,
               perflibs_int_t y_stride_col, perflibs_int_t nrhs, T alpha) {
-  // CSR transpose SpSM falls back to columnwise SpSV in call_spsm(). CSC
-  // transpose is remapped to notrans before reaching this kernel.
-  assert(trans != PERFLIBS_OPERATION_TRANS &&
-         trans != PERFLIBS_OPERATION_CONJTRANS);
-
-  if (perflibs::sparse::omp::is_mp && csr.par_sv.nthreads > 1 &&
-      !csr.par_sv.level_ptr.empty()) {
+  const bool use_parallel_notrans = perflibs::sparse::omp::is_mp &&
+                                    csr.par_sv.nthreads > 1 &&
+                                    !csr.par_sv.level_ptr.empty() &&
+                                    (trans == PERFLIBS_OPERATION_NOTRANS ||
+                                     trans == PERFLIBS_OPERATION_CONJNOTRANS);
+  if (use_parallel_notrans) {
     if (trans == PERFLIBS_OPERATION_NOTRANS ||
         (!perflibs::sparse::is_complex_v<T> &&
          trans == PERFLIBS_OPERATION_CONJNOTRANS)) {

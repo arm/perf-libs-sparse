@@ -8,6 +8,7 @@
 #include "add.hpp"
 #include "c_api_complex_abi.hpp"
 #include "matmul.hpp"
+#include "matrix_state.hpp"
 #include "matvec.hpp"
 #include "norm.hpp"
 #include "solve.hpp"
@@ -99,9 +100,7 @@ perflibs_status_t perflibs_spsm_optimize(enum perflibs_sparse_hint_value transA,
                                          perflibs_spmat_t A, perflibs_spmat_t X,
                                          perflibs_sparse_hint_value alpha,
                                          perflibs_spmat_t Y) {
-  (void)X;
   (void)alpha;
-  (void)Y;
   auto info =
       perflibs_spmat_hint(A, PERFLIBS_SPARSE_HINT_SPSM_OPERATION, transA);
   if (info != PERFLIBS_STATUS_SUCCESS) {
@@ -111,7 +110,20 @@ perflibs_status_t perflibs_spsm_optimize(enum perflibs_sparse_hint_value transA,
   if (info != PERFLIBS_STATUS_SUCCESS) {
     return info;
   }
-  return perflibs_spsv_optimize(A);
+  if (!perflibs::sparse::have_compatible_matrix_datatypes(A, X, Y)) {
+    return PERFLIBS_STATUS_EXECUTION_FAILURE;
+  } else if (A->datatype == PERFLIBS_DATATYPE_SINGLE) {
+    return perflibs::sparse::spsm_optimize<float>(transA, A, X, Y);
+  } else if (A->datatype == PERFLIBS_DATATYPE_DOUBLE) {
+    return perflibs::sparse::spsm_optimize<double>(transA, A, X, Y);
+  } else if (A->datatype == PERFLIBS_DATATYPE_CPLXSINGLE) {
+    return perflibs::sparse::spsm_optimize<std::complex<float>>(transA, A, X,
+                                                                Y);
+  } else if (A->datatype == PERFLIBS_DATATYPE_CPLXDOUBLE) {
+    return perflibs::sparse::spsm_optimize<std::complex<double>>(transA, A, X,
+                                                                 Y);
+  }
+  return PERFLIBS_STATUS_EXECUTION_FAILURE;
 }
 
 perflibs_status_t
@@ -278,12 +290,22 @@ perflibs_status_t perflibs_spadd_exec_z(enum perflibs_sparse_hint_value transA,
 perflibs_status_t perflibs_spsm_exec_s(enum perflibs_sparse_hint_value transA,
                                        perflibs_spmat_t A, perflibs_spmat_t X,
                                        float alpha, perflibs_spmat_t Y) {
+
+  if (!(perflibs::sparse::have_compatible_matrix_datatypes(A, X, Y) &&
+        A->datatype == PERFLIBS_DATATYPE_SINGLE)) {
+    return PERFLIBS_STATUS_EXECUTION_FAILURE;
+  }
   return perflibs::sparse::spsm_exec(transA, A, X, alpha, Y);
 }
 
 perflibs_status_t perflibs_spsm_exec_d(enum perflibs_sparse_hint_value transA,
                                        perflibs_spmat_t A, perflibs_spmat_t X,
                                        double alpha, perflibs_spmat_t Y) {
+
+  if (!(perflibs::sparse::have_compatible_matrix_datatypes(A, X, Y) &&
+        A->datatype == PERFLIBS_DATATYPE_DOUBLE)) {
+    return PERFLIBS_STATUS_EXECUTION_FAILURE;
+  }
   return perflibs::sparse::spsm_exec(transA, A, X, alpha, Y);
 }
 
@@ -291,6 +313,11 @@ perflibs_status_t perflibs_spsm_exec_c(enum perflibs_sparse_hint_value transA,
                                        perflibs_spmat_t A, perflibs_spmat_t X,
                                        perflibs_singlecomplex_t alpha,
                                        perflibs_spmat_t Y) {
+
+  if (!(perflibs::sparse::have_compatible_matrix_datatypes(A, X, Y) &&
+        A->datatype == PERFLIBS_DATATYPE_CPLXSINGLE)) {
+    return PERFLIBS_STATUS_EXECUTION_FAILURE;
+  }
   return perflibs::sparse::spsm_exec(
       transA, A, X, perflibs::sparse::c_api::to_cpp_scalar(alpha), Y);
 }
@@ -299,6 +326,11 @@ perflibs_status_t perflibs_spsm_exec_z(enum perflibs_sparse_hint_value transA,
                                        perflibs_spmat_t A, perflibs_spmat_t X,
                                        perflibs_doublecomplex_t alpha,
                                        perflibs_spmat_t Y) {
+
+  if (!(perflibs::sparse::have_compatible_matrix_datatypes(A, X, Y) &&
+        A->datatype == PERFLIBS_DATATYPE_CPLXDOUBLE)) {
+    return PERFLIBS_STATUS_EXECUTION_FAILURE;
+  }
   return perflibs::sparse::spsm_exec(
       transA, A, X, perflibs::sparse::c_api::to_cpp_scalar(alpha), Y);
 }

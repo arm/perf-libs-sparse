@@ -18,6 +18,11 @@ template <typename T>
 perflibs_status_t spsv_optimize(perflibs_spmat_impl_t<T> *impl);
 
 template <typename T>
+perflibs_status_t
+spsm_optimize(perflibs_sparse_hint_value trans, perflibs_spmat_top_t *A,
+              perflibs_spmat_top_t *X, perflibs_spmat_top_t *Y);
+
+template <typename T>
 perflibs_status_t spsm_exec(perflibs_sparse_hint_value trans,
                             perflibs_spmat_top_t *A, perflibs_spmat_top_t *X,
                             T alpha, perflibs_spmat_top_t *Y);

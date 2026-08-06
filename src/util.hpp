@@ -13,9 +13,12 @@
 #include <cassert>
 #include <cmath>
 #include <complex>
-#include <omp.h>
 #include <string>
 #include <type_traits>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace perflibs::sparse {
 
@@ -97,6 +100,38 @@ inline int get_max_threads() noexcept {
   return get_nested() ? omp_get_max_threads() : 1;
 #else
   return 1;
+#endif
+}
+
+inline int get_max_active_levels() noexcept {
+#ifdef _OPENMP
+  return omp_get_max_active_levels();
+#else
+  return 1;
+#endif
+}
+
+inline int get_active_level() noexcept {
+#ifdef _OPENMP
+  return omp_get_active_level();
+#else
+  return 0;
+#endif
+}
+
+inline void set_max_active_levels(int levels) noexcept {
+#ifdef _OPENMP
+  omp_set_max_active_levels(levels);
+#else
+  (void)levels;
+#endif
+}
+
+inline void set_num_threads(int nthreads) noexcept {
+#ifdef _OPENMP
+  omp_set_num_threads(nthreads);
+#else
+  (void)nthreads;
 #endif
 }
 

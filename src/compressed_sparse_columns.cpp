@@ -490,30 +490,6 @@ void spsv_csc(const perflibs_csc<T> &csc, sparse_hint_value_internal trans,
   spsv_csr(csr, csr_trans, csr_uplo, diag, x, y, alpha);
 }
 
-template <typename T>
-void spsm_csc(const perflibs_csc<T> &csc, sparse_hint_value_internal trans,
-              sparse_hint_value_internal uplo, sparse_hint_value_internal diag,
-              T *X, perflibs_int_t x_stride_row, perflibs_int_t x_stride_col,
-              const T *Y, perflibs_int_t y_stride_row,
-              perflibs_int_t y_stride_col, perflibs_int_t nrhs, T alpha) {
-
-  auto csr_trans = PERFLIBS_OPERATION_TRANS;
-  if (trans == PERFLIBS_OPERATION_TRANS) {
-    csr_trans = PERFLIBS_OPERATION_NOTRANS;
-  } else if (trans == PERFLIBS_OPERATION_CONJTRANS) {
-    csr_trans = PERFLIBS_OPERATION_CONJNOTRANS;
-  }
-  auto csr_uplo = uplo == PERFLIBS_SHAPE_UPPER_TRIANGULAR
-                      ? PERFLIBS_SHAPE_LOWER_TRIANGULAR
-                      : PERFLIBS_SHAPE_UPPER_TRIANGULAR;
-
-  auto csr = perflibs_csr<T>(csc.n, csc.m, csc.vals_ptr, csc.col_ptr_ptr,
-                             csc.row_indx_ptr, csc.par_sv);
-
-  spsm_csr(csr, csr_trans, csr_uplo, diag, X, x_stride_row, x_stride_col, Y,
-           y_stride_row, y_stride_col, nrhs, alpha);
-}
-
 template void spsv_csc<float>(const perflibs_csc<float> &csc,
                               sparse_hint_value_internal trans,
                               sparse_hint_value_internal uplo,
@@ -534,35 +510,6 @@ template void spsv_csc<std::complex<double>>(
     sparse_hint_value_internal trans, sparse_hint_value_internal uplo,
     sparse_hint_value_internal diag, std::complex<double> *x,
     const std::complex<double> *y, std::complex<double> alpha);
-
-template void spsm_csc<float>(
-    const perflibs_csc<float> &csc, sparse_hint_value_internal trans,
-    sparse_hint_value_internal uplo, sparse_hint_value_internal diag, float *X,
-    perflibs_int_t x_stride_row, perflibs_int_t x_stride_col, const float *Y,
-    perflibs_int_t y_stride_row, perflibs_int_t y_stride_col,
-    perflibs_int_t nrhs, float alpha);
-template void spsm_csc<double>(
-    const perflibs_csc<double> &csc, sparse_hint_value_internal trans,
-    sparse_hint_value_internal uplo, sparse_hint_value_internal diag, double *X,
-    perflibs_int_t x_stride_row, perflibs_int_t x_stride_col, const double *Y,
-    perflibs_int_t y_stride_row, perflibs_int_t y_stride_col,
-    perflibs_int_t nrhs, double alpha);
-template void spsm_csc<std::complex<float>>(
-    const perflibs_csc<std::complex<float>> &csc,
-    sparse_hint_value_internal trans, sparse_hint_value_internal uplo,
-    sparse_hint_value_internal diag, std::complex<float> *X,
-    perflibs_int_t x_stride_row, perflibs_int_t x_stride_col,
-    const std::complex<float> *Y, perflibs_int_t y_stride_row,
-    perflibs_int_t y_stride_col, perflibs_int_t nrhs,
-    std::complex<float> alpha);
-template void spsm_csc<std::complex<double>>(
-    const perflibs_csc<std::complex<double>> &csc,
-    sparse_hint_value_internal trans, sparse_hint_value_internal uplo,
-    sparse_hint_value_internal diag, std::complex<double> *X,
-    perflibs_int_t x_stride_row, perflibs_int_t x_stride_col,
-    const std::complex<double> *Y, perflibs_int_t y_stride_row,
-    perflibs_int_t y_stride_col, perflibs_int_t nrhs,
-    std::complex<double> alpha);
 
 template <typename T1>
 template <typename T2>

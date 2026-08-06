@@ -121,4 +121,31 @@ template <typename T>
 void spsv_supernodal(perflibs_supernodal<T> &supernodal,
                      perflibs_sparse_hint_value trans, T *x, const T *y,
                      T alpha);
+
+/*
+ * Performs a triangular solve for multiple dense RHS vectors using a
+ * supernodal matrix.
+ * @f[ op(A) X = \alpha Y @f]
+ * The matrix @f$ A @f$ is supplied in supernodal format
+ * @param [in]  supernodal    The matrix in supernodal format
+ * @param [in]  trans         The transpose operation to apply
+ * @param [out] X             The output dense matrix @f$ X @f$ to be solved for
+ * @param [in]  x_stride_row  Row stride for the output dense matrix @f$ X @f$
+ * @param [in]  x_stride_col  Column stride for the output dense matrix @f$ X
+ * @f$
+ * @param [in]  alpha         Scalar @f$ \alpha @f$ to be multiplied to the RHS
+ * matrix @f$ Y @f$
+ * @param [in]  Y             The input dense RHS matrix
+ * @param [in]  y_stride_row  Row stride for the input dense RHS matrix @f$ Y
+ * @f$
+ * @param [in]  y_stride_col  Column stride for the input dense RHS matrix
+ * @f$ Y @f$
+ * @param [in]  nrhs          The number of RHS vectors
+ */
+template <typename T>
+void spsm_supernodal(perflibs_supernodal<T> &supernodal,
+                     perflibs_sparse_hint_value trans, T *X,
+                     perflibs_int_t x_stride_row, perflibs_int_t x_stride_col,
+                     T alpha, const T *Y, perflibs_int_t y_stride_row,
+                     perflibs_int_t y_stride_col, perflibs_int_t nrhs);
 } // namespace perflibs::sparse
