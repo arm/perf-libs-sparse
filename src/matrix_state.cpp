@@ -381,8 +381,8 @@ perflibs_status_t set_hint(perflibs_spmat_impl_t<T> *impl,
 
   case PERFLIBS_SPARSE_HINT_SPSV_STRATEGY:
     if (value == PERFLIBS_SPARSE_SPSV_STRAT_UNSET ||
-        value == PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_LEVEL_SET ||
-        value == PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_TRSV) {
+        value == PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_SPARSE ||
+        value == PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_DENSE) {
       impl->userhint_spsv_strat = value;
     } else {
       return PERFLIBS_STATUS_INPUT_PARAMETER_ERROR;

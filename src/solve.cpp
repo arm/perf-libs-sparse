@@ -913,10 +913,10 @@ perflibs_status_t spsv_optimize(perflibs_spmat_impl_t<T> *impl) {
       auto sep = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
           impl->supernodal.separator->impl);
 
-      // Solve a dense separator with cblas_trsv instead of the level-set kernel
+      // Solve a dense separator with cblas_trsv instead of the sparse kernel
       const auto sep_hint = impl->userhint_spsv_strat;
       const bool dense_sep =
-          sep_hint == PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_TRSV ||
+          sep_hint == PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_DENSE ||
           (sep_hint == PERFLIBS_SPARSE_SPSV_STRAT_UNSET &&
            use_dense_separator(sep));
       if (dense_sep) {

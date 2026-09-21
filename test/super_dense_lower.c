@@ -60,7 +60,7 @@ int main() {
                   PERFLIBS_STATUS_INPUT_PARAMETER_ERROR);
 
   CHECK_STATUS(perflibs_spmat_hint(mat, PERFLIBS_SPARSE_HINT_SPSV_STRATEGY,
-                                   PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_TRSV));
+                                   PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_DENSE));
 
   CHECK_STATUS(perflibs_spsv_optimize(mat));
 
@@ -87,7 +87,7 @@ int main() {
 
   CHECK_STATUS(
       perflibs_spmat_hint(mat, PERFLIBS_SPARSE_HINT_SPSV_STRATEGY,
-                          PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_LEVEL_SET));
+                          PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_SPARSE));
 
   CHECK_STATUS(perflibs_spsv_optimize(mat));
 
@@ -104,7 +104,7 @@ int main() {
   }
 
   CHECK_STATUS(perflibs_spmat_hint(mat, PERFLIBS_SPARSE_HINT_SPSV_STRATEGY,
-                                   PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_TRSV));
+                                   PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_DENSE));
 
   CHECK_STATUS(perflibs_spsv_optimize(mat));
 
