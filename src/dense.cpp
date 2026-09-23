@@ -417,7 +417,9 @@ spsv_trsv(perflibs_dense_layout layout, sparse_hint_value_internal trans,
                                                     : CblasConjTrans;
   auto cuplo =
       uplo == PERFLIBS_SHAPE_UPPER_TRIANGULAR ? CblasUpper : CblasLower;
-  auto cdiag = diag == PERFLIBS_DIAG_NON_UNIT ? CblasNonUnit : CblasUnit;
+  auto cdiag = diag == PERFLIBS_DIAG_UNIT || diag == PERFLIBS_DIAG_KNOWN_UNIT
+                   ? CblasUnit
+                   : CblasNonUnit;
   CBLAS_LAYOUT clayout =
       layout == PERFLIBS_COL_MAJOR ? CblasColMajor : CblasRowMajor;
   cblas_trsv<T>(clayout, cuplo, ctrans, cdiag, n, A, lda, x, 1);

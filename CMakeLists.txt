@@ -707,6 +707,8 @@ if(SPARSE_ENABLE_TESTS)
     "${CMAKE_CURRENT_SOURCE_DIR}/test/super_spsm_lower.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/super_spsm_upper.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/super_upper.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/super_dense_lower.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/super_dense_upper.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/vector_type_smoke.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/spsm_basic_c.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/spsm_basic_d.c"

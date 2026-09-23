@@ -43,6 +43,17 @@ constexpr perflibs_int_t spsm_rhs_parallel_max_chunk_size = 8;
 // parts or CSR levels.
 constexpr int spsm_sparse_parallel_min_threads = 4;
 
+// Only convert a supernodal separator to dense when there are enough threads.
+constexpr int spsv_dense_separator_min_threads = 4;
+
+// Small or sparse separators do not benefit from the dense solve.
+constexpr int64_t spsv_dense_separator_min_rows = 1024;
+constexpr double spsv_dense_separator_min_density = 0.15;
+
+// Bound the n*n dense storage allocated without an explicit hint.
+constexpr int64_t bytes_per_gib = int64_t(1024) * 1024 * 1024;
+constexpr int64_t spsv_dense_separator_max_bytes = 8 * bytes_per_gib;
+
 static perflibs_int_t largest_divisor_not_greater_than(perflibs_int_t value,
                                                        perflibs_int_t limit) {
   for (auto divisor = limit; divisor > 1; --divisor) {
@@ -57,6 +68,25 @@ static perflibs_int_t largest_divisor_not_greater_than(perflibs_int_t value,
 static bool supports_generic_spsm_kernel(spmat_format_t format) {
   return format == perflibs_format_csr || format == perflibs_format_csc ||
          format == perflibs_format_coo || format == perflibs_format_scs;
+}
+
+template <typename T>
+static bool use_dense_separator(const perflibs_spmat_impl_t<T> *sep) {
+  constexpr bool verbose = false;
+  const int64_t n = sep->n;
+  const double density =
+      n > 0 ? sep->nnz / (0.5 * (double)n * (double)(n + 1)) : 0.0;
+  const int64_t dense_bytes = (int64_t)sizeof(T) * n * n;
+  const int threads = perflibs::sparse::omp::get_max_threads();
+  const bool use_dense = threads >= spsv_dense_separator_min_threads &&
+                         n >= spsv_dense_separator_min_rows &&
+                         density >= spsv_dense_separator_min_density &&
+                         dense_bytes <= spsv_dense_separator_max_bytes;
+  if (verbose)
+    printf("Separator n = %" PRId64 ", density = %.3f, threads = %d, "
+           "dense bytes = %" PRId64 ", so using %s separator solve\n",
+           n, density, threads, dense_bytes, use_dense ? "dense" : "sparse");
+  return use_dense;
 }
 
 template <typename T>
@@ -882,6 +912,19 @@ perflibs_status_t spsv_optimize(perflibs_spmat_impl_t<T> *impl) {
 
       auto sep = reinterpret_cast<perflibs_spmat_impl_t<T> *>(
           impl->supernodal.separator->impl);
+
+      // Solve a dense separator with cblas_trsv instead of the sparse kernel
+      const auto sep_hint = impl->userhint_spsv_strat;
+      const bool dense_sep =
+          sep_hint == PERFLIBS_SPARSE_SPSV_STRAT_SEPARATOR_DENSE ||
+          (sep_hint == PERFLIBS_SPARSE_SPSV_STRAT_UNSET &&
+           use_dense_separator(sep));
+      if (dense_sep) {
+        auto conv = convert(perflibs_format_dense, sep);
+        if (conv != PERFLIBS_STATUS_SUCCESS) {
+          return conv;
+        }
+      }
       auto info = spsv_optimize(sep);
       if (info != PERFLIBS_STATUS_SUCCESS) {
         return info;

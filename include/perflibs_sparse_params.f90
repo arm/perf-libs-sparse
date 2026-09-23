@@ -21,6 +21,7 @@ module perflibs_sparse_params
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_hint_spsv_operation = 63
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_hint_spmm_strategy = 64
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_hint_spsm_operation = 65
+    integer(kind=perflibs_i4), parameter :: perflibs_sparse_hint_spsv_strategy = 66
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_hint_memory = 70
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_hint_spmv_invocations = 80
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_hint_spmm_invocations = 81
@@ -60,6 +61,10 @@ module perflibs_sparse_params
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_spmm_strat_opt_no_struct = 601
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_spmm_strat_opt_part_struct = 602
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_spmm_strat_opt_full_struct = 603
+
+    integer(kind=perflibs_i4), parameter :: perflibs_sparse_spsv_strat_unset = 700
+    integer(kind=perflibs_i4), parameter :: perflibs_sparse_spsv_strat_separator_sparse = 701
+    integer(kind=perflibs_i4), parameter :: perflibs_sparse_spsv_strat_separator_dense = 702
 
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_norm_inf = 1001
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_norm_frb = 1002

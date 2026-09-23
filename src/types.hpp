@@ -70,6 +70,9 @@ template <typename T> struct perflibs_spmat_impl_t {
   perflibs_sparse_hint_value userhint_spsv_invocations =
       PERFLIBS_SPARSE_INVOCATIONS_MANY;
 
+  perflibs_sparse_hint_value userhint_spsv_strat =
+      PERFLIBS_SPARSE_SPSV_STRAT_UNSET;
+
   bool userhint_hpcg = false;
   /// A flag to say what type of optimization has actually been performed
   /// previously for spmm (as opposed to what was requested, which is the hint
