@@ -10,6 +10,12 @@ All notable changes to `perf-libs-sparse` are documented in this file.
 
 ### Fixed
 
+- Fixed SVE dispatch being compiled out when `SPARSE_ENABLE_SVE=ON` with
+  baseline compiler flags. Previously, this required adding
+  `-march=armv8-a+sve` to `DEFAULT_SPARSE_COMMON_FLAGS`; `spec.cpp` now
+  uses `PERFLIBS_HAVE_SVE_KERNELS` while remaining compiled for the
+  baseline armv8.0.
+
 ## [26.07] - 2026-07-09
 
 ### Added
