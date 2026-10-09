@@ -392,12 +392,19 @@ add_library(sparse_obj OBJECT
 add_dependencies(sparse_obj sparse_asm_gen sparse_cpp_gen)
 sparse_enable_coverage(sparse_obj)
 
-# Compile this TU with SVE enabled
-set_source_files_properties(
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/spec_sve.cpp"
-  PROPERTIES
-    COMPILE_OPTIONS "-march=armv8-a+sve"
-)
+# Compile the SVE kernels and standalone feature check for SVE, while keeping
+# the dispatch code on the baseline armv8.0.
+if(SPARSE_ENABLE_SVE)
+  set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/spec_sve.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/machine/machine.cpp"
+    PROPERTIES COMPILE_OPTIONS "-march=armv8-a+sve"
+  )
+  set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/spec.cpp"
+    PROPERTIES COMPILE_DEFINITIONS PERFLIBS_HAVE_SVE_KERNELS
+  )
+endif()
 
 # Apply -ffast-math to the CSR kernel translation unit (equivalent to the old Makefile's CENTRAL_CXXFLAGS+=-ffast-math for compressed_sparse_rows)
 # Do this only for GNU, since with modern LLVM -ffast-math conflicts with -fcx-fortran-rules, which is set project-wide

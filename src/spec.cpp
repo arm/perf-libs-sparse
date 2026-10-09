@@ -20,7 +20,7 @@ template <typename T>
 const std::vector<std::pair<int, scs_spmv_kernels<T>>> &
 scs_get_valid_C(T vals) {
 // Avoid dependencies on SVE code altogether if SVE is not enabled
-#if defined(__ARM_FEATURE_SVE)
+#if defined(PERFLIBS_HAVE_SVE_KERNELS)
   if (get_sve()) {
     return scs_get_valid_C_sve<T>(vals);
   } else
@@ -47,7 +47,7 @@ gs_kernel_t<T> get_gustavson_kernel(perflibs_sparse_hint_value transA,
                                     perflibs_sparse_hint_value transB,
                                     perflibs_int_t m, perflibs_int_t n,
                                     T alpha) {
-#if defined(__ARM_FEATURE_SVE)
+#if defined(PERFLIBS_HAVE_SVE_KERNELS)
   if (get_sve()) {
     return get_gustavson_kernel_sve<T>(transA, transB, m, n, alpha);
   } else
@@ -79,7 +79,7 @@ get_gustavson_kernel_vals_only(perflibs_sparse_hint_value transA,
                                perflibs_sparse_hint_value transB,
                                perflibs_int_t m, perflibs_int_t n, T alpha,
                                sparse_matrix_statistics stats) {
-#if defined(__ARM_FEATURE_SVE)
+#if defined(PERFLIBS_HAVE_SVE_KERNELS)
   if (get_sve()) {
     return get_gustavson_kernel_vals_only_sve<T>(transA, transB, m, n, alpha,
                                                  stats);
@@ -104,7 +104,7 @@ template gs_na_kernel_t<std::complex<double>>
         perflibs_int_t, std::complex<double>, sparse_matrix_statistics);
 
 template <typename T> bool get_if_mgmd_is_required() {
-#if defined(__ARM_FEATURE_SVE)
+#if defined(PERFLIBS_HAVE_SVE_KERNELS)
   if (get_sve()) {
     return get_if_mgmd_is_required_sve<T>();
   } else
