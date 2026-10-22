@@ -10,6 +10,8 @@
 #include "object_helpers.hpp"
 #include "types.hpp"
 
+#include <perflibs_sparse_reproducibility.h>
+
 #include <algorithm>
 #include <atomic>
 #include <limits>
@@ -1111,6 +1113,8 @@ template perflibs_csr<std::complex<double>> identity2csr(perflibs_int_t n);
 
 /* CSR kernels */
 
+/* This kernel is treated as reproducible. Each loop iteration owns one output
+ * row, so scheduling does not change its arithmetic. */
 template <typename T>
 void spmv_csr_vanilla(const perflibs_csr<T> &csr, const T *x, T *y, T alpha,
                       T beta) {
@@ -1123,9 +1127,9 @@ void spmv_csr_vanilla(const perflibs_csr<T> &csr, const T *x, T *y, T alpha,
 #pragma omp parallel for default(none) schedule(static)                        \
     firstprivate(row_ptr, col_indx, vals, off) shared(csr, x, y, alpha, beta)  \
     num_threads(csr.par_mv.nthreads)
-  for (int i = 0; i < csr.m; i++) {
+  for (perflibs_int_t i = 0; i < csr.m; i++) {
     T sum = 0;
-    for (int j = row_ptr[i] - off; j < row_ptr[i + 1] - off; j++) {
+    for (perflibs_int_t j = row_ptr[i] - off; j < row_ptr[i + 1] - off; j++) {
       sum += x[col_indx[j] - off] * vals[j];
     }
 
@@ -1212,6 +1216,9 @@ inline void update_y(std::complex<double> &y, std::complex<double> value) {
 // Perform SpMV with a default assumption of a parallel decomposition over rows
 // of the matrix. This is used in the case that no parallel decomposition has
 // been created in the CSR class
+//
+// This kernel is treated as reproducible. Each output row is computed
+// by one thread, so scheduling does not change its accumulation order.
 template <typename T, decltype(&no_conj<T>) conj>
 static void spmv_csr_notrans_no_parallel_strat(const perflibs_csr<T> &csr,
                                                const T *x, T *y, T alpha,
@@ -1644,19 +1651,43 @@ void spmv_csr_trans(const perflibs_csr<T> &csr, const T *x, T *y, T alpha) {
   }
 }
 
+/* Traverse stored entries in a fixed order; transpose output columns may be
+ * shared by many rows. */
+template <typename T, decltype(&no_conj<T>) conj>
+static void spmv_csr_trans_reproducible(const perflibs_csr<T> &csr, const T *x,
+                                        T *y, T alpha) {
+  const auto row_ptr = csr.row_ptr_ptr;
+  const auto col_indx = csr.col_indx_ptr;
+  const auto vals = csr.vals_ptr;
+  const auto off = row_ptr[0];
+
+  for (perflibs_int_t row = 0; row < csr.m; ++row) {
+    for (perflibs_int_t j = row_ptr[row] - off; j < row_ptr[row + 1] - off;
+         ++j) {
+      y[col_indx[j] - off] += alpha * conj(vals[j]) * x[row];
+    }
+  }
+}
+
 template <typename T>
 void spmv_csr(const perflibs_csr<T> &csr, sparse_hint_value_internal trans,
               const T *x, T *y, T alpha, T beta) {
+  const bool reproducible = perflibs_sparse_get_reproducibility() ==
+                            PERFLIBS_SPARSE_REPRODUCIBILITY_ENABLED;
 
   if (trans == PERFLIBS_OPERATION_NOTRANS) {
-    if (csr.use_vanilla) {
+    if (reproducible || csr.use_vanilla) {
       spmv_csr_vanilla<T>(csr, x, y, alpha, beta);
     } else {
       spmv_csr_notrans<T, no_conj<T>>(csr, x, y, alpha, beta);
     }
   } else if (trans ==
              PERFLIBS_OPERATION_CONJNOTRANS) { // used for CSC in CONJTRANS case
-    spmv_csr_notrans<T, conj<T>>(csr, x, y, alpha, beta);
+    if (reproducible) {
+      spmv_csr_notrans_no_parallel_strat<T, conj<T>>(csr, x, y, alpha, beta);
+    } else {
+      spmv_csr_notrans<T, conj<T>>(csr, x, y, alpha, beta);
+    }
   } else {
     // Transpose case, set up y according to beta
     if (beta == (T)0) {
@@ -1670,9 +1701,17 @@ void spmv_csr(const perflibs_csr<T> &csr, sparse_hint_value_internal trans,
     }
 
     if (trans == PERFLIBS_OPERATION_TRANS) {
-      spmv_csr_trans<T, no_conj<T>>(csr, x, y, alpha);
+      if (reproducible) {
+        spmv_csr_trans_reproducible<T, no_conj<T>>(csr, x, y, alpha);
+      } else {
+        spmv_csr_trans<T, no_conj<T>>(csr, x, y, alpha);
+      }
     } else if (trans == PERFLIBS_OPERATION_CONJTRANS) {
-      spmv_csr_trans<T, conj<T>>(csr, x, y, alpha);
+      if (reproducible) {
+        spmv_csr_trans_reproducible<T, conj<T>>(csr, x, y, alpha);
+      } else {
+        spmv_csr_trans<T, conj<T>>(csr, x, y, alpha);
+      }
     }
   }
 }

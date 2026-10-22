@@ -12,6 +12,8 @@
 #include "types.hpp"
 #include <algorithm>
 
+#include <perflibs_sparse_reproducibility.h>
+
 // Implementations of functions required to support CSR
 
 namespace perflibs::sparse {
@@ -447,6 +449,13 @@ void spmv_coo(perflibs_coo<T> &coo, const sparse_hint_value_internal trans,
       : trans == PERFLIBS_OPERATION_CONJTRANS   ? &spmv_coo_trans<T, conj<T>>
                                                 : nullptr;
   assert(kernel != nullptr && "Bad value of trans, no kernel found.");
+
+  if (perflibs_sparse_get_reproducibility() ==
+      PERFLIBS_SPARSE_REPRODUCIBILITY_ENABLED) {
+    kernel(coo.row_indx_ptr, coo.col_indx_ptr, coo.vals_ptr, coo.nnz, x, y,
+           alpha, beta, index_base);
+    return;
+  }
 
 #if defined(_OPENMP)
 

@@ -23,6 +23,8 @@
 #include "timer.hpp"
 #include "unused.hpp"
 
+#include <perflibs_sparse_reproducibility.h>
+
 #include <cstring>
 #include <inttypes.h>
 
@@ -528,6 +530,18 @@ template <typename T> void audition_spmv(perflibs_spmat_impl_t<T> *impl) {
 }
 
 template <typename T>
+perflibs_status_t optimize_spmv_reproducible(perflibs_spmat_impl_t<T> *impl) {
+  if (impl->spmat_format == perflibs_format_csr) {
+    impl->csr.par_mv = {};
+    impl->csr.use_vanilla = true;
+  } else if (impl->spmat_format == perflibs_format_bsr) {
+    impl->bsr.use_vanilla = true;
+  }
+
+  return PERFLIBS_STATUS_SUCCESS;
+}
+
+template <typename T>
 perflibs_status_t spmat_update(perflibs_spmat_top_t *A,
                                perflibs_int_t n_updates,
                                const perflibs_int_t *row_indx,
@@ -607,6 +621,7 @@ perflibs_status_t spmv_optimize(perflibs_spmat_impl_t<T> *impl) {
     return PERFLIBS_STATUS_SUCCESS;
   }
 
+  // Retain an existing SCS representation unless the operation has changed.
   if (impl->spmat_format == perflibs_format_scs) {
     if (impl->scs.optimized_op ==
         (sparse_hint_value_internal)impl->userhint_spmv_op) {
@@ -619,6 +634,17 @@ perflibs_status_t spmv_optimize(perflibs_spmat_impl_t<T> *impl) {
     if (impl->csr.vals.empty()) {
       return PERFLIBS_STATUS_SUCCESS;
     }
+  }
+
+  if (perflibs_sparse_get_reproducibility() ==
+      PERFLIBS_SPARSE_REPRODUCIBILITY_ENABLED) {
+    return optimize_spmv_reproducible(impl);
+  }
+
+  if (impl->spmat_format == perflibs_format_csr) {
+    impl->csr.use_vanilla = false;
+  } else if (impl->spmat_format == perflibs_format_bsr) {
+    impl->bsr.use_vanilla = false;
   }
 
   if (impl->userhint_spmv_invocations == PERFLIBS_SPARSE_INVOCATIONS_MANY) {

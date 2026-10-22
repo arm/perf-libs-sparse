@@ -454,6 +454,9 @@ template void spmv_bsr_realloc_data(perflibs_bsr<std::complex<double>> &bsr);
  * multiplication
  * @param [in] beta		Scalar to scale the input vector y by before
  * adding the result of the matrix-vector multiplication
+ *
+ * This kernel is treated as reproducible. Each loop iteration owns one output
+ * block row and accumulates blocks in stored order.
  */
 template <typename T>
 void spmv_bsr_vanilla(const perflibs_bsr<T> &bsr, const T *const x, T *y,

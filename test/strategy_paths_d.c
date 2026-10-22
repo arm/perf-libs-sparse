@@ -6,6 +6,7 @@
  */
 
 #include "perflibs_sparse.h"
+#include "perflibs_sparse_reproducibility.h"
 #include "test_utils.h"
 
 #include <cblas.h>
@@ -232,5 +233,18 @@ int main() {
           PERFLIBS_SPARSE_SPMM_STRAT_OPT_FULL_STRUCT) != EXIT_SUCCESS) {
     return EXIT_FAILURE;
   }
-  return EXIT_SUCCESS;
+
+  // Repeat the SpMM checks with reproducible matrix statistics, used by SVE.
+  const enum perflibs_sparse_reproducibility_value initial_mode =
+      perflibs_sparse_get_reproducibility();
+  CHECK_STATUS(perflibs_sparse_set_reproducibility(
+      PERFLIBS_SPARSE_REPRODUCIBILITY_ENABLED));
+  int result = test_spmm_optimized_symbolic_strategy_double(
+      PERFLIBS_SPARSE_SPMM_STRAT_OPT_PART_STRUCT);
+  if (result == EXIT_SUCCESS) {
+    result = test_spmm_optimized_symbolic_strategy_double(
+        PERFLIBS_SPARSE_SPMM_STRAT_OPT_FULL_STRUCT);
+  }
+  CHECK_STATUS(perflibs_sparse_set_reproducibility(initial_mode));
+  return result;
 }

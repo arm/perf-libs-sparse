@@ -1,5 +1,20 @@
 [
   {
+    "name": "perflibs_sparse_set_reproducibility",
+    "returnType": "perflibs_status_t",
+    "parameters": [
+      {
+        "name": "mode",
+        "type": "enum perflibs_sparse_reproducibility_value"
+      }
+    ]
+  },
+  {
+    "name": "perflibs_sparse_get_reproducibility",
+    "returnType": "enum perflibs_sparse_reproducibility_value",
+    "parameters": []
+  },
+  {
     "name": "perflibs_spmat_create_csr_s",
     "returnType": "perflibs_status_t",
     "parameters": [
@@ -4672,6 +4687,16 @@
   {
     "name": "perflibs_spnorm_exec_zd_",
     "returnType": "void",
+    "parameters": []
+  },
+  {
+    "name": "perflibs_sparse_set_reproducibility_",
+    "returnType": "void",
+    "parameters": []
+  },
+  {
+    "name": "perflibs_sparse_get_reproducibility_",
+    "returnType": "int32_t",
     "parameters": []
   }
 ]

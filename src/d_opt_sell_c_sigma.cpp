@@ -14,6 +14,9 @@ namespace perflibs::sparse {
 // Because we don't have valid kernels for Arm64EC we cannot use this
 // implementation
 #if !defined(_M_ARM64EC) && !defined(__arm64ec__)
+// This kernel is treated as reproducible for a fixed SCS representation.
+// Each chunk owns complete output rows, so thread scheduling does not
+// change their accumulation order.
 template <>
 void spmv_scs_opt(const perflibs_scs<double> &scs, const double *x, double *y,
                   double alpha, double beta) {

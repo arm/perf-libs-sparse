@@ -716,6 +716,9 @@ template void perflibs_scs<std::complex<double>>::gen_data_vectors(
     enum sparse_hint_value_internal trans, const perflibs_int_t *row_ptr,
     const perflibs_int_t *col_indx, const std::complex<double> *vals);
 
+// This kernel is treated as reproducible for a fixed SCS representation.
+// Each chunk owns complete output rows, so thread scheduling does not
+// change their accumulation order.
 template <typename T, int C>
 void spmv_scs(const perflibs_scs<T> &scs, const T *x, T *y, T alpha, T beta) {
   assert(scs.C == C);

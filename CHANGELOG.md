@@ -6,7 +6,27 @@ All notable changes to `perf-libs-sparse` are documented in this file.
 
 ### Added
 
+- Added public C and Fortran reproducibility APIs to set and query the
+  process-global sparse reproducibility mode.
+- Added a reproducible `COO` `SpMV` path that uses serial `COO`
+  accumulation when reproducibility mode is enabled.
+- Added a fixed row-order calculation of the `mgmd` matrix statistic when
+  reproducibility mode is enabled, preserving the existing parallel reduction
+  when disabled.
+- Added reproducible `CSR` and `CSC` `SpMV` execution paths. In the internal
+  CSR view, transpose accumulation uses a fixed stored-entry order and
+  non-transpose execution uses row-owned kernels. CSC operations use this
+  view with transpose semantics reversed.
+- Made `SpMV` optimization reproducibility-aware. When reproducibility mode is
+  enabled, optimization bypasses timing-based auditioning.
+
 ### Changed
+
+- Deprecated the `PERFLIBS_SPARSE_HINT_STRUCTURE` hint type and all its
+  possible values. To be removed in version 27.01. This hint is not
+  actually used during the optimization phase and consequently there will
+  be no change in library behaviour when user applications are updated to
+  avoid setting this hint.
 
 ### Fixed
 

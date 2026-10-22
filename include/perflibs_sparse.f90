@@ -8,6 +8,24 @@ module perflibs_sparse
     use perflibs_kinds
     use perflibs_sparse_params
 
+!   Sparse reproducibility control interfaces
+
+    interface
+        subroutine perflibs_sparse_set_reproducibility(mode, info)
+            use perflibs_kinds
+            implicit none
+            integer(kind=perflibs_i4), intent(in) :: mode
+            integer, intent(out) :: info
+        end subroutine perflibs_sparse_set_reproducibility
+    end interface
+
+    interface
+        integer(kind=perflibs_i4) function perflibs_sparse_get_reproducibility()
+            use perflibs_kinds
+            implicit none
+        end function perflibs_sparse_get_reproducibility
+    end interface
+
 !   Sparse matrix utility subroutines
 
     interface perflibs_spmat_create_csr

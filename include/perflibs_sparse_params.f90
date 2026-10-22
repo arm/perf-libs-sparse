@@ -69,4 +69,7 @@ module perflibs_sparse_params
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_norm_inf = 1001
     integer(kind=perflibs_i4), parameter :: perflibs_sparse_norm_frb = 1002
 
+    integer(kind=perflibs_i4), parameter :: perflibs_sparse_reproducibility_disabled = 2001
+    integer(kind=perflibs_i4), parameter :: perflibs_sparse_reproducibility_enabled = 2002
+
 end module perflibs_sparse_params

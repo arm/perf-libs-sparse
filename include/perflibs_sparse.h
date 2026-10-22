@@ -84,8 +84,20 @@ typedef const struct perflibs_spvec_top_t *perflibs_const_spvec_t;
 
 /* ENUMs */
 
+#if defined(PERFLIBS_SUPPRESS_DEPRECATED_WARNINGS)
+#define PERFLIBS_DEPRECATED(msg)
+#elif defined(__cplusplus) && __cplusplus >= 201402L
+#define PERFLIBS_DEPRECATED(msg) [[deprecated(msg)]]
+#elif defined(__clang__) || defined(__GNUC__)
+#define PERFLIBS_DEPRECATED(msg) __attribute__((deprecated(msg)))
+#else
+#define PERFLIBS_DEPRECATED(msg)
+#endif
+
 enum perflibs_sparse_hint_type {
-  PERFLIBS_SPARSE_HINT_STRUCTURE = 50,
+  PERFLIBS_SPARSE_HINT_STRUCTURE PERFLIBS_DEPRECATED(
+      "Sparse structure hints are deprecated and will be removed in version "
+      "27.01") = 50,
   PERFLIBS_SPARSE_HINT_SPMV_OPERATION = 60,
   PERFLIBS_SPARSE_HINT_SPMM_OPERATION = 61,
   PERFLIBS_SPARSE_HINT_SPADD_OPERATION = 62,
@@ -104,16 +116,36 @@ enum perflibs_dense_layout { PERFLIBS_COL_MAJOR = 90, PERFLIBS_ROW_MAJOR = 91 };
 
 enum perflibs_sparse_hint_value {
   /* Structure hints */
-  PERFLIBS_SPARSE_STRUCTURE_DENSE = 100,
-  PERFLIBS_SPARSE_STRUCTURE_UNSTRUCTURED = 101,
-  PERFLIBS_SPARSE_STRUCTURE_SYMMETRIC = 110,
-  PERFLIBS_SPARSE_STRUCTURE_DIAGONAL = 120,
-  PERFLIBS_SPARSE_STRUCTURE_BLOCKDIAGONAL = 130,
-  PERFLIBS_SPARSE_STRUCTURE_BANDED = 140,
-  PERFLIBS_SPARSE_STRUCTURE_TRIANGULAR = 150,
-  PERFLIBS_SPARSE_STRUCTURE_BLOCKTRIANGULAR = 160,
-  PERFLIBS_SPARSE_STRUCTURE_HERMITIAN = 170,
-  PERFLIBS_SPARSE_STRUCTURE_HPCG = 180,
+  PERFLIBS_SPARSE_STRUCTURE_DENSE PERFLIBS_DEPRECATED(
+      "Sparse structure hints are deprecated and will be removed in version "
+      "27.01") = 100,
+  PERFLIBS_SPARSE_STRUCTURE_UNSTRUCTURED PERFLIBS_DEPRECATED(
+      "Sparse structure hints are deprecated and will be removed in version "
+      "27.01") = 101,
+  PERFLIBS_SPARSE_STRUCTURE_SYMMETRIC PERFLIBS_DEPRECATED(
+      "Sparse structure hints are deprecated and will be removed in version "
+      "27.01") = 110,
+  PERFLIBS_SPARSE_STRUCTURE_DIAGONAL PERFLIBS_DEPRECATED(
+      "Sparse structure hints are deprecated and will be removed in version "
+      "27.01") = 120,
+  PERFLIBS_SPARSE_STRUCTURE_BLOCKDIAGONAL PERFLIBS_DEPRECATED(
+      "Sparse structure hints are deprecated and will be removed in version "
+      "27.01") = 130,
+  PERFLIBS_SPARSE_STRUCTURE_BANDED PERFLIBS_DEPRECATED(
+      "Sparse structure hints are deprecated and will be removed in version "
+      "27.01") = 140,
+  PERFLIBS_SPARSE_STRUCTURE_TRIANGULAR PERFLIBS_DEPRECATED(
+      "Sparse structure hints are deprecated and will be removed in version "
+      "27.01") = 150,
+  PERFLIBS_SPARSE_STRUCTURE_BLOCKTRIANGULAR PERFLIBS_DEPRECATED(
+      "Sparse structure hints are deprecated and will be removed in version "
+      "27.01") = 160,
+  PERFLIBS_SPARSE_STRUCTURE_HERMITIAN PERFLIBS_DEPRECATED(
+      "Sparse structure hints are deprecated and will be removed in version "
+      "27.01") = 170,
+  PERFLIBS_SPARSE_STRUCTURE_HPCG PERFLIBS_DEPRECATED(
+      "Sparse structure hints are deprecated and will be removed in version "
+      "27.01") = 180,
   /* Memory allocation allowed? */
   PERFLIBS_SPARSE_MEMORY_NOALLOCS = 200,
   PERFLIBS_SPARSE_MEMORY_ALLOCS = 201,
@@ -144,6 +176,12 @@ enum perflibs_sparse_norm {
   PERFLIBS_SPARSE_NORM_INF = 1001, // Infinity norm
   PERFLIBS_SPARSE_NORM_FRB = 1002  // Frobenius norm
 };
+
+#ifndef PERFLIBS_BUILD // not PERFLIBS_BUILD
+#include "perflibs_sparse_reproducibility.h"
+#endif // end not PERFLIBS_BUILD
+
+#define PERFLIBS_SPARSE_HAVE_REPRODUCIBILITY 1
 
 /* Flags for matrix creation */
 #define PERFLIBS_SPARSE_CREATE_NOCOPY 1

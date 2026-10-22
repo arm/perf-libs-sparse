@@ -32,3 +32,14 @@ clang-format 21.1.0 with pip:
 ```bash
 pip3 install clang-format==21.1.0
 ```
+
+Use the following command to maintain the correct style:
+
+```bash
+clang-format -i \
+  --style=LLVM \
+  src/*pp \
+  test/*.[ch] \
+  include/perflibs_*.h \
+  machine/*pp
+```

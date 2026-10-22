@@ -248,6 +248,7 @@ set(SPARSE_CPP_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/execute_api.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/matrix_api.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vector_api.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reproducibility.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/block_sparse_rows.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/compressed_sparse_columns.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/compressed_sparse_rows.cpp
@@ -447,6 +448,9 @@ endif()
 
 target_link_libraries(sparse_obj PRIVATE machine::machine)
 target_link_libraries(sparse_obj PRIVATE "${_SPARSE_CBLAS_TARGET}")
+target_compile_definitions(sparse_obj PRIVATE
+  PERFLIBS_SUPPRESS_DEPRECATED_WARNINGS
+)
 
 # -----------------------
 # Apply compile-only C/C++ defaults to specific targets (only when user didn't set CMAKE_CXX_FLAGS)
@@ -705,8 +709,10 @@ if(SPARSE_ENABLE_TESTS)
     "${CMAKE_CURRENT_SOURCE_DIR}/test/csr_spsv_omp_paths.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/solve_variants.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/solve_variants_z.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/reproducibility_api.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/spmv_basic_d.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/spmm_strategy_z.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/spmv_optimize_reproducibility.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/strategy_paths_s.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/strategy_paths_d.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/spvec_ops.c"
@@ -754,6 +760,9 @@ if(SPARSE_ENABLE_TESTS)
     if(SPARSE_ENABLE_INT64)
       target_compile_definitions(${_tgt} PRIVATE INTEGER64=1)
     endif()
+    target_compile_definitions(${_tgt} PRIVATE
+      PERFLIBS_SUPPRESS_DEPRECATED_WARNINGS
+    )
 
     # If user didn't set CMAKE_CXX_FLAGS, give tests the same compile-only defaults
     if("${CMAKE_CXX_FLAGS}" STREQUAL "")
@@ -792,6 +801,7 @@ write_basic_package_version_file(
 
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/include/perflibs_sparse.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/perflibs_sparse_reproducibility.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/include/perflibs_status.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/api/public_symbols.json"
   DESTINATION "${_SPARSE_INSTALL_INCLUDEDIR}"

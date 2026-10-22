@@ -5,7 +5,10 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
  */
 
+#include <cstdint>
+
 #include <perflibs_sparse.h>
+#include <perflibs_sparse_reproducibility.h>
 
 #include "add.hpp"
 #include "export.hpp"
@@ -22,6 +25,16 @@
 // Fortran compatibility functions
 
 extern "C" {
+
+void FTN_SYMB(perflibs_sparse_set_reproducibility)(const int32_t *mode,
+                                                   perflibs_int_t *info) {
+  *info = (perflibs_int_t)perflibs_sparse_set_reproducibility(
+      (perflibs_sparse_reproducibility_value)*mode);
+}
+
+int32_t FTN_SYMB(perflibs_sparse_get_reproducibility)(void) {
+  return (int32_t)perflibs_sparse_get_reproducibility();
+}
 
 void FTN_SYMB(perflibs_spmat_create_csr_s)(
     perflibs_spmat_t *A, const perflibs_int_t *m, const perflibs_int_t *n,
